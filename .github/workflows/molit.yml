@@ -1,0 +1,46 @@
+name: molit-daily
+
+on:
+  schedule:
+    # 매일 09:05 KST == 00:05 UTC
+    - cron: "5 0 * * *"
+  workflow_dispatch:
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # 크롬/드라이버 설치
+      - name: Install Chromium
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y chromium-browser chromium-chromedriver
+          echo "CHROME_BIN=/usr/bin/chromium-browser" >> $GITHUB_ENV
+          echo "CHROMEDRIVER_BIN=/usr/bin/chromedriver" >> $GITHUB_ENV
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Decode SA json
+        run: |
+          echo "$SA_JSON_B64" | base64 -d > sa.json
+        env:
+          SA_JSON_B64: ${{ secrets.SA_JSON_B64 }}
+
+      - name: Run job (download + preprocess + write to Sheets)
+        env:
+          SHEET_ID: ${{ secrets.SHEET_ID }}
+          SA_PATH:  $GITHUB_WORKSPACE/sa.json
+          TZ: Asia/Seoul
+        run: |
+          python rt_allinone.py
