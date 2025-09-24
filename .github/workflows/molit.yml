@@ -1,5 +1,4 @@
 name: molit-daily
-
 on:
   schedule:
     # 매일 09:05 KST == 00:05 UTC
