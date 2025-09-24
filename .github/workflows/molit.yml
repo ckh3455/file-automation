@@ -2,19 +2,20 @@ name: molit-daily
 
 on:
   schedule:
-    # 매일 09:05 KST == 00:05 UTC
-    - cron: "5 0 * * *"
+    - cron: "5 0 * * *"   # 매일 09:05 KST
   workflow_dispatch:
 
 jobs:
   run:
     runs-on: ubuntu-latest
+    timeout-minutes: 30     # 전체 잡 30분 안에 자동 종료
+    env:
+      CI: "1"               # CI 모드 스위치 (파이썬에서 읽음)
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # 크롬/드라이버 설치 (Ubuntu runner)
       - name: Install Chromium & Chromedriver
         run: |
           sudo apt-get update
@@ -32,17 +33,16 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      # 서비스계정 키 파일 생성 (Base64 아님! 원문 그대로)
       - name: Write service account json
         run: |
           printf "%s" "${{ secrets.GDRIVE_SA_JSON }}" > sa.json
 
       - name: Run job (download + preprocess + upload + write to Sheets)
+        timeout-minutes: 20              # 파이썬 스텝 개별 타임아웃
         env:
           TZ: Asia/Seoul
           SA_PATH: ${{ github.workspace }}/sa.json
           DRIVE_FOLDER_ID: ${{ secrets.DRIVE_FOLDER_ID }}
-          # 보관일수 바꾸고 싶으면 3 -> 7 등으로
           DRIVE_RETENTION_DAYS: "3"
           SHEET_ID: ${{ secrets.SHEET_ID }}
         run: |
