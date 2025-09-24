@@ -2,23 +2,28 @@ name: molit-daily
 
 on:
   schedule:
-    - cron: "5 0 * * *"   # KST 09:05
+    # 매일 09:05 KST == 00:05 UTC
+    - cron: "5 0 * * *"
   workflow_dispatch:
 
 jobs:
   run:
     runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
 
-      - name: Install Chromium
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # 크롬/드라이버 설치 (Ubuntu runner)
+      - name: Install Chromium & Chromedriver
         run: |
           sudo apt-get update
           sudo apt-get install -y chromium-browser chromium-chromedriver
           echo "CHROME_BIN=/usr/bin/chromium-browser" >> $GITHUB_ENV
           echo "CHROMEDRIVER_BIN=/usr/bin/chromedriver" >> $GITHUB_ENV
 
-      - uses: actions/setup-python@v5
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
@@ -27,18 +32,18 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      # 서비스계정 JSON을 파일로 저장
-      - name: Write SA JSON
+      # 서비스계정 키 파일 생성 (Base64 아님! 원문 그대로)
+      - name: Write service account json
         run: |
-          printf '%s' "${GDRIVE_SA_JSON}" > sa.json
-        env:
-          GDRIVE_SA_JSON: ${{ secrets.GDRIVE_SA_JSON }}
+          printf "%s" "${{ secrets.GDRIVE_SA_JSON }}" > sa.json
 
-      - name: Run script
+      - name: Run job (download + preprocess + upload + write to Sheets)
         env:
           TZ: Asia/Seoul
-          DRIVE_FOLDER_ID: ${{ secrets.DRIVE_FOLDER_ID }}
-          DRIVE_RETENTION_DAYS: ${{ secrets.DRIVE_RETENTION_DAYS }}
           SA_PATH: ${{ github.workspace }}/sa.json
+          DRIVE_FOLDER_ID: ${{ secrets.DRIVE_FOLDER_ID }}
+          # 보관일수 바꾸고 싶으면 3 -> 7 등으로
+          DRIVE_RETENTION_DAYS: "3"
+          SHEET_ID: ${{ secrets.SHEET_ID }}
         run: |
           python rt_allinone.py
