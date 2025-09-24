@@ -6,20 +6,37 @@ on:
     - cron: "5 0 * * *"
   workflow_dispatch:
 
+concurrency:
+  group: molit-daily
+  cancel-in-progress: false
+
 jobs:
   run:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    # 공통 환경변수 (필요한 시크릿을 여기서 주입)
+    env:
+      TZ: Asia/Seoul
+      # Google Drive 업로드용
+      DRIVE_FOLDER_ID: ${{ secrets.DRIVE_FOLDER_ID }}
+      GDRIVE_SA_JSON: ${{ secrets.GDRIVE_SA_JSON }}
+      DRIVE_RETENTION_DAYS: ${{ secrets.DRIVE_RETENTION_DAYS || 3 }}
+      # (선택) 구글 시트에 기록하려면 시트 ID도 시크릿으로 넣어 사용
+      SHEET_ID: ${{ secrets.SHEET_ID }}
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # 크롬/드라이버 설치
-      - name: Install Chromium
+      # Chrome / Chromedriver 셋업 (가장 안정적인 방법)
+      - name: Setup Google Chrome
+        uses: browser-actions/setup-chrome@v1
+
+      - name: Show Chrome
         run: |
-          sudo apt-get update
-          sudo apt-get install -y chromium-browser chromium-chromedriver
-          echo "CHROME_BIN=/usr/bin/chromium-browser" >> $GITHUB_ENV
-          echo "CHROMEDRIVER_BIN=/usr/bin/chromedriver" >> $GITHUB_ENV
+          echo "Chrome path: $CHROME_PATH"
+          $CHROME_PATH --version || true
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -31,16 +48,17 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Decode SA json
+      # 서비스계정 JSON(원문) -> 파일로 저장
+      - name: Write service account JSON
         run: |
-          echo "$SA_JSON_B64" | base64 -d > sa.json
-        env:
-          SA_JSON_B64: ${{ secrets.SA_JSON_B64 }}
+          echo '${{ env.GDRIVE_SA_JSON }}' > $GITHUB_WORKSPACE/sa.json
 
-      - name: Run job (download + preprocess + write to Sheets)
+      # 파이썬 실행 (다운로드 + 전처리 + Drive 업로드 + 보관기간 정리 + (옵션)시트쓰기)
+      - name: Run job (download + preprocess + upload + sheets)
         env:
-          SHEET_ID: ${{ secrets.SHEET_ID }}
-          SA_PATH:  $GITHUB_WORKSPACE/sa.json
-          TZ: Asia/Seoul
+          # 구글 라이브러리들이 자동으로 참조하는 표준 환경변수
+          GOOGLE_APPLICATION_CREDENTIALS: ${{ github.workspace }}/sa.json
+          # (일부 셀레니움 환경에서 필요할 수 있는 바이너리 경로 힌트)
+          CHROME_PATH: ${{ env.CHROME_PATH }}
         run: |
           python rt_allinone.py
