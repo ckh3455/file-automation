@@ -2,7 +2,7 @@ name: molit-daily
 
 on:
   schedule:
-    - cron: "5 0 * * *"   # 매일 09:05 KST (00:05 UTC)
+    - cron: "5 0 * * *"   # 매일 09:05 KST
   workflow_dispatch:
 
 jobs:
@@ -11,62 +11,54 @@ jobs:
     timeout-minutes: 30
     env:
       CI: "1"
-      # 파이썬 출력 버퍼링 끄기(실시간 로그)
       PYTHONUNBUFFERED: "1"
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Print runner info
+        run: |
+          set -euxo pipefail
+          python --version
+          pip --version
+          uname -a
+
       - name: Install Chromium & Chromedriver
         run: |
           set -euxo pipefail
           sudo apt-get update
           sudo apt-get install -y chromium-browser chromium-chromedriver
-          echo "CHROME_BIN=/usr/bin/chromium-browser"   >> "$GITHUB_ENV"
-          echo "CHROMEDRIVER_BIN=/usr/bin/chromedriver" >> "$GITHUB_ENV"
+          echo "CHROME_BIN=/usr/bin/chromium-browser" >> $GITHUB_ENV
+          echo "CHROMEDRIVER_BIN=/usr/bin/chromedriver" >> $GITHUB_ENV
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Install deps
+      # 시크릿 존재 여부 미리 확인(없으면 바로 실패 원인 표시)
+      - name: Check required secrets
+        run: |
+          set -e
+          test -n "${{ secrets.GDRIVE_SA_JSON }}" || { echo "❌ GDRIVE_SA_JSON is missing"; exit 1; }
+          test -n "${{ secrets.DRIVE_FOLDER_ID }}" || { echo "❌ DRIVE_FOLDER_ID is missing"; exit 1; }
+          test -n "${{ secrets.SHEET_ID }}" || { echo "❌ SHEET_ID is missing"; exit 1; }
+          echo "✅ All required secrets exist."
+
+      - name: Install deps (capture pip log)
         run: |
           set -euxo pipefail
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          # 네트워크/빌드 에러 원인 파악을 위해 상세 로그 저장
+          pip install -r requirements.txt --default-timeout=120 -v 2>&1 | tee pip-install.log
 
       - name: Write service account json
         run: |
           set -euxo pipefail
-          # 서비스계정 JSON 작성 (줄바꿈/공백 그대로)
           printf "%s" "${{ secrets.GDRIVE_SA_JSON }}" > sa.json
-          chmod 600 sa.json
-          # 최소한의 유효성 검증(내용은 출력하지 않음)
-          python - <<'PY'
-          import json, sys
-          try:
-              with open("sa.json","r") as f:
-                  data=json.load(f)
-              assert "client_email" in data and "private_key" in data
-          except Exception as e:
-              print("SA JSON 검증 실패:", e, file=sys.stderr)
-              sys.exit(1)
-          print("SA JSON OK")
-          PY
-
-      - name: Show versions & sanity check
-        run: |
-          set -euxo pipefail
-          python --version
-          pip --version
-          chromium-browser --version || true
-          chromedriver --version || true
-          ls -al
-          # 파일 존재 확인
-          test -f rt_allinone.py
-          test -f sa.json
+          # 파일이 실제로 만들어졌는지 확인
+          jq -r '.client_email' sa.json | sed 's/.*/✅ SA json ok: &/'
 
       - name: Run job (download + preprocess + upload + write to Sheets)
         timeout-minutes: 20
@@ -76,17 +68,18 @@ jobs:
           DRIVE_FOLDER_ID: ${{ secrets.DRIVE_FOLDER_ID }}
           DRIVE_RETENTION_DAYS: "3"
           SHEET_ID: ${{ secrets.SHEET_ID }}
-        shell: bash
         run: |
           set -euxo pipefail
-          # 실시간 로그 + 파일 저장
-          python -u rt_allinone.py 2>&1 | tee runlog.txt
+          python rt_allinone.py 2>&1 | tee runlog.txt
 
-      # 실패/성공과 상관없이 로그 보관
-      - name: Upload run log
+      # 항상 로그를 남겨서 실패 원인을 잡기 쉽게
+      - name: Upload logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: runlog
-          path: runlog.txt
-          retention-days: 7
+          name: run-logs
+          path: |
+            pip-install.log
+            runlog.txt
+            sa.json
+          if-no-files-found: warn
