@@ -37,6 +37,7 @@ jobs:
         with:
           python-version: "3.11"
 
+      # 필수 시크릿 존재 여부 확인 (괄호문법 수정 버전)
       - name: Check required secrets
         env:
           GDRIVE_SA_JSON: ${{ secrets.GDRIVE_SA_JSON }}
@@ -44,9 +45,9 @@ jobs:
           SHEET_ID: ${{ secrets.SHEET_ID }}
         run: |
           set -e
-          [ -n "$GDRIVE_SA_JSON" ]   || { echo "❌ GDRIVE_SA_JSON is missing"; exit 1; }
-          [ -n "$DRIVE_FOLDER_ID" ]  || { echo "❌ DRIVE_FOLDER_ID is missing"; exit 1; }
-          [ -n "$SHEET_ID" ]         || { echo "❌ SHEET_ID is missing"; exit 1; }
+          [ -n "$GDRIVE_SA_JSON" ]  || { echo "❌ GDRIVE_SA_JSON is missing"; exit 1; }
+          [ -n "$DRIVE_FOLDER_ID" ] || { echo "❌ DRIVE_FOLDER_ID is missing"; exit 1; }
+          [ -n "$SHEET_ID" ]        || { echo "❌ SHEET_ID is missing"; exit 1; }
           echo "✅ All required secrets exist."
 
       - name: Install deps (capture pip log)
@@ -62,7 +63,13 @@ jobs:
           set -euxo pipefail
           printf "%s" "$GDRIVE_SA_JSON" > sa.json
           python - << 'PY'
-import json; print("✅ SA client_email:", json.load(open("sa.json","r",encoding="utf-8")).get("client_email"))
+import json, sys
+try:
+    obj = json.load(open("sa.json","r",encoding="utf-8"))
+    print("✅ SA client_email:", obj.get("client_email"))
+except Exception as e:
+    print("❌ service account json invalid:", e)
+    sys.exit(1)
 PY
 
       - name: Run job (download + preprocess + upload + write to Sheets)
