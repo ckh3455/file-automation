@@ -24,13 +24,16 @@ jobs:
           pip --version
           uname -a
 
-      - name: Install Chromium & Chromedriver
+      # Chrome을 스냅 대신 빠르게 설치 (속도/안정성 ↑)
+      - name: Setup Chrome
+        id: chrome
+        uses: browser-actions/setup-chrome@v1
+
+      - name: Export CHROME_BIN
         run: |
           set -euxo pipefail
-          sudo apt-get update
-          sudo apt-get install -y chromium-browser chromium-chromedriver
-          echo "CHROME_BIN=/usr/bin/chromium-browser" >> $GITHUB_ENV
-          echo "CHROMEDRIVER_BIN=/usr/bin/chromedriver" >> $GITHUB_ENV
+          echo "CHROME_BIN=${{ steps.chrome.outputs.chrome-path }}" >> $GITHUB_ENV
+          which chromedriver || true
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -42,6 +45,16 @@ jobs:
           set -euxo pipefail
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+          python -c "import selenium, sys; print('Selenium:', selenium.__version__); sys.stdout.flush()"
+
+      # 필수 시크릿 존재 확인 (여기서 바로 실패 원인 보이게)
+      - name: Check required secrets
+        run: |
+          set -euxo pipefail
+          test -n "${{ secrets.GDRIVE_SA_JSON }}" || { echo "❌ GDRIVE_SA_JSON is missing"; exit 1; }
+          test -n "${{ secrets.DRIVE_FOLDER_ID }}" || { echo "❌ DRIVE_FOLDER_ID is missing"; exit 1; }
+          test -n "${{ secrets.SHEET_ID }}" || { echo "❌ SHEET_ID is missing"; exit 1; }
+          echo "✅ All required secrets exist."
 
       - name: Write service account json
         env:
@@ -50,14 +63,13 @@ jobs:
           set -euxo pipefail
           printf "%s" "$GDRIVE_SA_JSON" > sa.json
           python - <<'PY'
-import json, sys
+import json,sys
 try:
     with open("sa.json","r",encoding="utf-8") as f:
-        obj = json.load(f)
-    print("SA OK:", obj.get("client_email"))
+        j=json.load(f)
+    print("SA OK:", j.get("client_email","(no client_email)")); sys.stdout.flush()
 except Exception as e:
-    print("SA JSON invalid:", e)
-    sys.exit(1)
+    print("SA JSON invalid:", e); sys.stdout.flush(); sys.exit(1)
 PY
 
       - name: Run job (download + preprocess + upload + write to Sheets)
@@ -70,7 +82,7 @@ PY
           SHEET_ID: ${{ secrets.SHEET_ID }}
         run: |
           set -euxo pipefail
-          python rt_allinone.py
+          python rt_allinone.py 2>&1 | tee runlog.txt
 
       - name: Upload logs
         if: always()
@@ -78,9 +90,6 @@ PY
         with:
           name: run-logs
           path: |
-            pip-install.log
             runlog.txt
             sa.json
-            page_dump_*.html
-            page_dump_*.png
           if-no-files-found: warn
