@@ -37,12 +37,17 @@ jobs:
         with:
           python-version: "3.11"
 
+      # ⬇️ 멀티라인 시크릿은 env로 주입 후 검사 (test: too many arguments 방지)
       - name: Check required secrets
+        env:
+          GDRIVE_SA_JSON: ${{ secrets.GDRIVE_SA_JSON }}
+          DRIVE_FOLDER_ID: ${{ secrets.DRIVE_FOLDER_ID }}
+          SHEET_ID: ${{ secrets.SHEET_ID }}
         run: |
           set -e
-          test -n "${{ secrets.GDRIVE_SA_JSON }}" || { echo "❌ GDRIVE_SA_JSON is missing"; exit 1; }
-          test -n "${{ secrets.DRIVE_FOLDER_ID }}" || { echo "❌ DRIVE_FOLDER_ID is missing"; exit 1; }
-          test -n "${{ secrets.SHEET_ID }}" || { echo "❌ SHEET_ID is missing"; exit 1; }
+          [ -n "$GDRIVE_SA_JSON" ]   || { echo "❌ GDRIVE_SA_JSON is missing"; exit 1; }
+          [ -n "$DRIVE_FOLDER_ID" ]  || { echo "❌ DRIVE_FOLDER_ID is missing"; exit 1; }
+          [ -n "$SHEET_ID" ]         || { echo "❌ SHEET_ID is missing"; exit 1; }
           echo "✅ All required secrets exist."
 
       - name: Install deps (capture pip log)
@@ -51,10 +56,17 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt --default-timeout=120 -v 2>&1 | tee pip-install.log
 
+      # ⬇️ 시크릿을 env로 받고 안전하게 파일로 저장 (printf + 쿼트)
       - name: Write service account json
+        env:
+          GDRIVE_SA_JSON: ${{ secrets.GDRIVE_SA_JSON }}
         run: |
           set -euxo pipefail
-          printf "%s" "${{ secrets.GDRIVE_SA_JSON }}" > sa.json
+          printf "%s" "$GDRIVE_SA_JSON" > sa.json
+          # JSON 유효성 가볍게 검증 (파이썬으로)
+          python - << 'PY'
+import json; print("✅ SA client_email:", json.load(open("sa.json","r",encoding="utf-8")).get("client_email"))
+PY
 
       - name: Run job (download + preprocess + upload + write to Sheets)
         timeout-minutes: 20
