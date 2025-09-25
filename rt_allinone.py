@@ -17,6 +17,23 @@ import numpy as np
 # ---- 즉시 flush ----
 print = lambda *a, **k: (sys.__stdout__.write((" ".join(map(str,a)) + "\n")), sys.__stdout__.flush())
 
+import tempfile, shutil  # 파일 상단 import에 추가
+
+def build_driver(download_dir: Path) -> webdriver.Chrome:
+    opts = Options()
+    # ... (기존 옵션들)
+    tmp_profile = Path(tempfile.mkdtemp(prefix="chrome_prof_")).as_posix()
+    opts.add_argument(f"--user-data-dir={tmp_profile}")  # 💡 유니크한 프로필
+    # ...
+    drv = webdriver.Chrome(service=service, options=opts)
+    drv.set_page_load_timeout(60)
+
+    # 종료 때 프로필 정리(이미 있으시면 스킵)
+    import atexit
+    atexit.register(lambda: shutil.rmtree(tmp_profile, ignore_errors=True))
+    return drv
+
+
 # -------------------------
 # 설정
 # -------------------------
@@ -406,3 +423,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
