@@ -1,86 +1,10 @@
 name: molit-daily
-
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "5 0 * * *"   # 매일 09:05 KST
 
 jobs:
-  run:
+  smoke:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
-    env:
-      CI: "1"
-      PYTHONUNBUFFERED: "1"
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Print runner info
-        run: |
-          set -euxo pipefail
-          python --version
-          pip --version
-          uname -a
-
-      - name: Install Chromium & Chromedriver
-        run: |
-          set -euxo pipefail
-          sudo apt-get update
-          sudo apt-get install -y chromium-browser chromium-chromedriver
-          echo "CHROME_BIN=/usr/bin/chromium-browser" >> $GITHUB_ENV
-          echo "CHROMEDRIVER_BIN=/usr/bin/chromedriver" >> $GITHUB_ENV
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Install deps
-        run: |
-          set -euxo pipefail
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-
-      - name: Write service account json
-        env:
-          GDRIVE_SA_JSON: ${{ secrets.GDRIVE_SA_JSON }}
-        run: |
-          set -euxo pipefail
-          printf "%s" "$GDRIVE_SA_JSON" > sa.json
-          python - <<'PY'
-import json, sys
-try:
-    with open("sa.json","r",encoding="utf-8") as f:
-        obj = json.load(f)
-    print("SA OK:", obj.get("client_email"))
-except Exception as e:
-    print("SA JSON invalid:", e)
-    sys.exit(1)
-PY
-
-      - name: Run job (download + preprocess + upload + write to Sheets)
-        timeout-minutes: 20
-        env:
-          TZ: Asia/Seoul
-          SA_PATH: ${{ github.workspace }}/sa.json
-          DRIVE_FOLDER_ID: ${{ secrets.DRIVE_FOLDER_ID }}
-          DRIVE_RETENTION_DAYS: "3"
-          SHEET_ID: ${{ secrets.SHEET_ID }}
-        run: |
-          set -euxo pipefail
-          python rt_allinone.py
-
-      - name: Upload logs
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: run-logs
-          path: |
-            pip-install.log
-            runlog.txt
-            sa.json
-            page_dump_*.html
-            page_dump_*.png
-          if-no-files-found: warn
+      - name: Say hi
+        run: echo "molit workflow is visible"
