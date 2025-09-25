@@ -1,18 +1,19 @@
 # -*- coding: utf-8 -*-
 """
-rt_allinone.py — '성공했을 때' 동작으로 롤백
-- 버튼 등장 대기: 12초
-- 다운로드 시작 감지: 30초
-- 클릭 시도: 10회 (3회마다 refresh)
-- 핵심 수정: '클릭 전에' 다운로드 폴더 스냅샷 → 시작 감지 정확히 복구
-- SA JSON 문제면 시트/드라이브는 자동 스킵, 다운로드/전처리/아티팩트는 계속
+rt_allinone.py — 클릭 실패(iframe 컨텍스트)만 교정한 '성공 버전' 롤백
+- 버튼 등장 대기: 12초 (BUTTON_APPEAR_WAIT)
+- 다운로드 시작 감지: 30초 (START_DETECT_SEC)
+- 클릭 시도: 10회 (CLICK_MAX_TRY, 3회마다 refresh)
+- 핵심: 프레임 안에서 찾은 버튼은 프레임으로 switch 후 클릭
+- '클릭 전에' 다운로드 폴더 스냅샷 → 시작 감지 (성공 버전 로직 유지)
+- SA JSON 오류면 시트/드라이브는 자동 스킵하고 다운로드/전처리/아티팩트만 계속
 """
 
 from __future__ import annotations
 import os, re, time, json, traceback
 from datetime import date, timedelta
 from pathlib import Path
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Tuple
 
 import pandas as pd
 import numpy as np
@@ -27,7 +28,7 @@ PROFILE  = ROOT / "_rt_profile"
 for p in (SAVE_DIR, TMP_DL, PROFILE):
     p.mkdir(parents=True, exist_ok=True)
 
-# 성공 당시 파라미터
+# '성공 당시' 파라미터
 CLICK_MAX_TRY           = int(os.environ.get("CLICK_MAX_TRY", "10"))
 BUTTON_APPEAR_WAIT      = float(os.environ.get("BUTTON_APPEAR_WAIT", "12"))
 START_DETECT_SEC        = int(os.environ.get("START_DETECT_SEC", "30"))
@@ -79,17 +80,10 @@ def build_driver(download_dir: Path) -> webdriver.Chrome:
     opts.add_argument("--no-sandbox")
     opts.add_argument("--disable-gpu")
     opts.add_argument("--disable-dev-shm-usage")
-    # 안정성 위해 사용자 데이터 디렉토리 사용
     opts.add_argument(f"--user-data-dir={PROFILE.resolve()}")
 
-    # runner에 설치된 chromedriver 우선 사용
     chromedriver_bin = os.environ.get("CHROMEDRIVER_BIN")
-    if chromedriver_bin and Path(chromedriver_bin).exists():
-        service = Service(chromedriver_bin)
-    else:
-        # 없으면 PATH에서 탐색
-        service = Service()
-
+    service = Service(chromedriver_bin) if chromedriver_bin and Path(chromedriver_bin).exists() else Service()
     driver = webdriver.Chrome(service=service, options=opts)
     driver.set_window_size(1400, 900)
     return driver
@@ -105,13 +99,10 @@ def _score_input(el) -> int:
                       for k in ("id","name","class","placeholder","title","aria-label")])
     except Exception:
         s = ""
-    for h in START_HINTS:
-        if h in s: sc += 2
-    for h in END_HINTS:
-        if h in s: sc += 2
+    for h in START_HINTS: sc += 2 if h in s else 0
+    for h in END_HINTS:   sc += 2 if h in s else 0
     try:
-        if (el.get_attribute("type") or "").lower() == "date":
-            sc += 3
+        if (el.get_attribute("type") or "").lower() == "date": sc += 3
         if el.is_displayed(): sc += 1
     except Exception:
         pass
@@ -187,13 +178,12 @@ def _visible_one(elems):
     return None
 
 def _search_button_in_context(ctx):
-    # 성공 당시 단순했던 탐색 우선
     try:
         c = ctx.find_elements(By.CSS_SELECTOR, 'a[href*=".xlsx"], a[href*=".xls"], a[download], #excel, #btnExcel, .btn-excel, .excel')
         btn = _visible_one(c)
         if btn: return btn
-    except Exception: pass
-    # 텍스트 fallback
+    except Exception:
+        pass
     xpaths = [
         ".//a[contains(text(),'엑셀') or contains(@title,'엑셀') or contains(text(),'EXCEL')]",
         ".//button[contains(text(),'엑셀') or contains(@title,'엑셀') or contains(text(),'EXCEL')]",
@@ -207,32 +197,46 @@ def _search_button_in_context(ctx):
             pass
     return None
 
-def find_download_button(driver: webdriver.Chrome, wait_sec: float = BUTTON_APPEAR_WAIT):
+def find_download_button_with_frame(driver: webdriver.Chrome, wait_sec: float = BUTTON_APPEAR_WAIT) -> Tuple[Optional[object], Optional[object]]:
+    """
+    반환: (button_element, frame_element)
+      - 메인 문서면 frame_element = None
+      - iframe 안에서 찾았으면 해당 iframe WebElement 반환
+    """
     t0 = time.time()
     while time.time() - t0 < wait_sec:
-        # 메인 문서에서
-        btn = _search_button_in_context(driver)
-        if btn: return btn
-        # iframe 내도 확인(최대 3개만)
-        ifr = driver.find_elements(By.TAG_NAME, "iframe")[:3]
-        for fr in ifr:
+        # 메인 문서
+        try:
+            btn = _search_button_in_context(driver)
+            if btn: return btn, None
+        except Exception:
+            pass
+
+        # iframe들
+        ifrs = driver.find_elements(By.TAG_NAME, "iframe")[:5]
+        for fr in ifrs:
             try:
                 driver.switch_to.frame(fr)
                 btn = _search_button_in_context(driver)
                 if btn:
-                    # 버튼은 frame 안의 element → 그냥 반환 (클릭시 그대로)
-                    return btn
+                    # 프레임 그대로 반환 (클릭 시 다시 들어감)
+                    driver.switch_to.default_content()
+                    return btn, fr
             except Exception:
-                pass
+                try: driver.switch_to.default_content()
+                except Exception: pass
             finally:
                 try: driver.switch_to.default_content()
                 except Exception: pass
+
         _scroll_probe(driver)
         time.sleep(0.25)
-    return None
+    return None, None
 
-def _try_click(driver, el) -> bool:
+def _try_click(driver, el, frame=None) -> bool:
     try:
+        if frame is not None:
+            driver.switch_to.frame(frame)
         driver.execute_script("arguments[0].scrollIntoView({block:'center'});", el)
         time.sleep(0.05)
         el.click()
@@ -245,6 +249,9 @@ def _try_click(driver, el) -> bool:
             return False
     except Exception:
         return False
+    finally:
+        try: driver.switch_to.default_content()
+        except Exception: pass
 
 # ---------------- 다운로드 감시 ----------------
 def _snapshot_files(d: Path) -> set[Path]: return set(d.glob("*"))
@@ -263,12 +270,12 @@ def _wait_download_finish(download_dir: Path, before: set[Path], timeout: int) -
     raise TimeoutError("다운로드 완료 대기 초과")
 
 def click_and_detect_start(driver: webdriver.Chrome, download_dir: Path, start_detect_sec: int) -> Optional[set]:
-    btn = find_download_button(driver, wait_sec=BUTTON_APPEAR_WAIT)
+    btn, fr = find_download_button_with_frame(driver, wait_sec=BUTTON_APPEAR_WAIT)
     if not btn:
         return None
-    # 🔴 핵심: 클릭 '전에' 스냅샷 (성공 버전 로직)
+    # 클릭 '전에' 스냅샷 (성공 버전 로직)
     before = _snapshot_files(download_dir)
-    if not _try_click(driver, btn):
+    if not _try_click(driver, btn, frame=fr):
         return None
     t0 = time.time()
     while time.time() - t0 < start_detect_sec:
