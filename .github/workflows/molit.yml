@@ -2,18 +2,31 @@ name: molit-daily
 
 on:
   schedule:
-    - cron: "5 0 * * *"   # 매일 09:05 KST (UTC 00:05)
+    - cron: "5 0 * * *"   # 매일 09:05 KST (00:05 UTC)
   workflow_dispatch:
 
 jobs:
   run:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CI: "1"
+      PYTHONUNBUFFERED: "1"
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Print runner info
+        run: |
+          set -euxo pipefail
+          python --version
+          pip --version
+          uname -a
+
       - name: Install Chromium & Chromedriver
         run: |
+          set -euxo pipefail
           sudo apt-get update
           sudo apt-get install -y chromium-browser chromium-chromedriver
           echo "CHROME_BIN=/usr/bin/chromium-browser" >> $GITHUB_ENV
@@ -24,16 +37,27 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install deps
+      - name: Check required secrets
         run: |
+          set -e
+          test -n "${{ secrets.GDRIVE_SA_JSON }}" || { echo "❌ GDRIVE_SA_JSON is missing"; exit 1; }
+          test -n "${{ secrets.DRIVE_FOLDER_ID }}" || { echo "❌ DRIVE_FOLDER_ID is missing"; exit 1; }
+          test -n "${{ secrets.SHEET_ID }}" || { echo "❌ SHEET_ID is missing"; exit 1; }
+          echo "✅ All required secrets exist."
+
+      - name: Install deps (capture pip log)
+        run: |
+          set -euxo pipefail
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          pip install -r requirements.txt --default-timeout=120 -v 2>&1 | tee pip-install.log
 
       - name: Write service account json
         run: |
+          set -euxo pipefail
           printf "%s" "${{ secrets.GDRIVE_SA_JSON }}" > sa.json
 
       - name: Run job (download + preprocess + upload + write to Sheets)
+        timeout-minutes: 20
         env:
           TZ: Asia/Seoul
           SA_PATH: ${{ github.workspace }}/sa.json
@@ -41,4 +65,18 @@ jobs:
           DRIVE_RETENTION_DAYS: "3"
           SHEET_ID: ${{ secrets.SHEET_ID }}
         run: |
-          python rt_allinone.py
+          set -euxo pipefail
+          python rt_allinone.py 2>&1 | tee runlog.txt
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: run-logs
+          path: |
+            pip-install.log
+            runlog.txt
+            sa.json
+            page_dump_*.html
+            page_dump_*.png
+          if-no-files-found: warn
