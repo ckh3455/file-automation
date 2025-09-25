@@ -1,23 +1,23 @@
 # -*- coding: utf-8 -*-
 """
-rt_allinone.py — 안정 버전(대기값 유지) + 날짜 입력 필드 견고화
-- 날짜 입력: 후보 input들을 광범위하게 수집 → 'start/end' 추정 스코어 → 쌍별로 직접 입력/검증
-- 엑셀 링크 탐색: a[href*=".xlsx"|".xls"]를 우선, 12초까지 대기(예전값)
-- 다운로드 시작 감지: 30초(예전값), 실패 시 경고만 찍고 다음 시도
-- 시도 3회마다 refresh() 후 재시도(예전 흐름)
-- Sheets/Drive는 SA JSON이 정상일 때만 수행(현재 JSON 포맷 오류라 건너뜀)
+rt_allinone.py — 안정 버전(시간값 원복) + 엑셀버튼 탐색만 보강
+- 버튼 등장 대기: 12초
+- 다운로드 시작 감지: 30초
+- 클릭 시도: 10회 (3회마다 refresh)
+- 날짜 입력은 견고(값 검증)하되, 나머지 흐름은 예전처럼 유지
+- SA JSON 불량이어도 작업은 계속(시트/드라이브만 스킵)
 """
 
 from __future__ import annotations
 import os, re, time, json, traceback
 from datetime import date, timedelta
 from pathlib import Path
-from typing import Optional, Tuple, List, Dict
+from typing import Optional, List, Dict
 
 import pandas as pd
 import numpy as np
 
-# --------- 상수/경로 ---------
+# ---------------- 기본 설정 ----------------
 URL = "https://rt.molit.go.kr/pt/xls/xls.do?mobileAt="
 
 ROOT = Path.cwd()
@@ -27,14 +27,14 @@ PROFILE  = ROOT / "_rt_profile"
 for p in (SAVE_DIR, TMP_DL, PROFILE):
     p.mkdir(parents=True, exist_ok=True)
 
-# 안정 값(“되던 세팅”)
-CLICK_MAX_TRY = int(os.environ.get("CLICK_MAX_TRY", "10"))
-START_DETECT_SEC = int(os.environ.get("START_DETECT_SEC", "30"))  # 시작감지 30초
-DOWNLOAD_TIMEOUT_FINISH = 300
+# “되던” 값으로 원복
+CLICK_MAX_TRY        = int(os.environ.get("CLICK_MAX_TRY", "10"))
+BUTTON_APPEAR_WAIT   = float(os.environ.get("BUTTON_APPEAR_WAIT", "12"))  # 엑셀 버튼 등장 대기
+START_DETECT_SEC     = int(os.environ.get("START_DETECT_SEC", "30"))      # 다운로드 시작 감지
+DOWNLOAD_TIMEOUT_FINISH = 300                                             # 완료 대기
 COOLDOWN_BETWEEN_FILES = 2
-BUTTON_APPEAR_WAIT = float(os.environ.get("BUTTON_APPEAR_WAIT", "12"))  # 엑셀버튼 등장 대기
 
-# Sheets/Drive
+# Google
 SHEET_ID = os.environ.get("SHEET_ID", "").strip()
 SA_PATH  = os.environ.get("SA_PATH", "").strip()
 DRIVE_FOLDER_ID = os.environ.get("DRIVE_FOLDER_ID", "").strip()
@@ -51,27 +51,25 @@ def shift_months(d: date, k: int) -> date:
     m2 = m + k
     y += (m2-1)//12
     m2 = (m2-1)%12 + 1
+    # 같은 일 유지하되 말일 보정
     end = (date(y, m2, 1) + timedelta(days=40)).replace(day=1) - timedelta(days=1)
     return date(y, m2, min(d.day, end.day))
 
-# ---------- Selenium ----------
+# ---------------- Selenium ----------------
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from webdriver_manager.chrome import ChromeDriverManager
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import (
     TimeoutException, ElementClickInterceptedException, ElementNotInteractableException
 )
 
 def build_driver(download_dir: Path) -> webdriver.Chrome:
     opts = Options()
-    chrome_bin = os.environ.get("CHROME_BIN")
-    if chrome_bin:
-        opts.binary_location = chrome_bin
+    if os.environ.get("CHROME_BIN"):
+        opts.binary_location = os.environ["CHROME_BIN"]
     prefs = {
         "download.default_directory": str(download_dir.resolve()),
         "download.prompt_for_download": False,
@@ -83,43 +81,35 @@ def build_driver(download_dir: Path) -> webdriver.Chrome:
     opts.add_argument("--no-sandbox")
     opts.add_argument("--disable-gpu")
     opts.add_argument("--disable-dev-shm-usage")
-    opts.add_argument(f"--user-data-dir={PROFILE.resolve()}")  # 세션 디렉토리
+    # 사용자 프로파일로 다운로드 권한 유지
+    opts.add_argument(f"--user-data-dir={PROFILE.resolve()}")
     service = Service(ChromeDriverManager().install())
     driver = webdriver.Chrome(service=service, options=opts)
     driver.set_window_size(1400, 900)
     return driver
 
-# ---------- 날짜 입력(견고화) ----------
-START_HINTS = ["start", "from", "sdate", "beg", "st", "fr", "시작", "startdate"]
-END_HINTS   = ["end", "to", "edate", "fin", "endd", "en", "종료", "enddate"]
+# ---------------- 날짜 입력(견고) ----------------
+START_HINTS = ["start","from","sdate","beg","st","fr","시작","startdate"]
+END_HINTS   = ["end","to","edate","fin","endd","en","종료","enddate"]
 
 def _score_input(el) -> int:
-    """속성들에 'start'/'end' 힌트가 얼마나 있는지 스코어링(우선 정렬용)"""
-    score = 0
-    txts = []
+    sc = 0
     try:
-        for k in ["id", "name", "class", "placeholder", "title", "aria-label"]:
-            v = el.get_attribute(k)
-            if v: txts.append(v.lower())
+        s = " ".join([(el.get_attribute(k) or "").lower()
+                      for k in ("id","name","class","placeholder","title","aria-label")])
     except Exception:
-        pass
-    s = " ".join(txts)
+        s = ""
     for h in START_HINTS: 
-        if h in s: score += 2
+        if h in s: sc += 2
     for h in END_HINTS:
-        if h in s: score += 2
-    # type=date 가산점
+        if h in s: sc += 2
     try:
         if (el.get_attribute("type") or "").lower() == "date":
-            score += 3
+            sc += 3
+        if el.is_displayed(): sc += 1
     except Exception:
         pass
-    # 화면에 보이면 가산점
-    try:
-        if el.is_displayed(): score += 1
-    except Exception:
-        pass
-    return score
+    return sc
 
 def _clear_and_type(el, s: str):
     el.click()
@@ -127,94 +117,106 @@ def _clear_and_type(el, s: str):
     el.send_keys(Keys.DELETE)
     el.send_keys(s)
 
-def _try_pair(driver, a, b, start_str, end_str) -> bool:
-    """a,b에 각각 start/end를 입력해보고 값이 실제로 들어갔는지 검증"""
+def _try_pair(driver, a, b, start_s, end_s) -> bool:
     try:
         driver.execute_script("arguments[0].scrollIntoView({block:'center'});", a)
-        _clear_and_type(a, start_str)
-        time.sleep(0.15)
+        _clear_and_type(a, start_s); time.sleep(0.12)
         driver.execute_script("arguments[0].scrollIntoView({block:'center'});", b)
-        _clear_and_type(b, end_str)
-        time.sleep(0.15)
+        _clear_and_type(b, end_s);   time.sleep(0.12)
         va = (a.get_attribute("value") or "").strip()
         vb = (b.get_attribute("value") or "").strip()
-        ok = (va == start_str) and (vb == end_str)
+        ok = (va == start_s) and (vb == end_s)
         log(f"    · probe pair → value check: {va} / {vb} → {ok}")
         return ok
-    except Exception as e:
+    except Exception:
         return False
 
 def set_dates(driver: webdriver.Chrome, start: date, end: date):
-    start_str, end_str = start.isoformat(), end.isoformat()
-    log(f"  - set_dates: {start_str} ~ {end_str}")
-
-    # 1) 가능한 input 전수 수집(보이는 것 우선)
-    all_inputs = driver.find_elements(By.CSS_SELECTOR, "input")
-    cand = []
-    for el in all_inputs:
-        try:
-            t = (el.get_attribute("type") or "").lower()
-            if t in ("date", "text", "search", "") and el.is_enabled():
-                cand.append(el)
-        except Exception:
-            pass
-    if not cand:
-        raise RuntimeError("날짜 입력 후보 input을 찾지 못했습니다.")
-
-    # 2) 스코어 높은 순으로 정렬
-    cand = sorted(cand, key=lambda e: _score_input(e), reverse=True)
-    log(f"    · input candidates: {len(cand)} (scored)")
-
-    # 3) 쌍 단위로 넣어 보면서 실제 값이 들어가는지 확인
+    start_s, end_s = start.isoformat(), end.isoformat()
+    log(f"  - set_dates: {start_s} ~ {end_s}")
+    inputs = [e for e in driver.find_elements(By.CSS_SELECTOR, "input")
+              if (e.get_attribute("type") or "").lower() in ("date","text","search","")]
+    if not inputs:
+        raise RuntimeError("날짜 입력 input을 못찾았습니다.")
+    inputs = sorted(inputs, key=_score_input, reverse=True)
+    log(f"    · input candidates: {len(inputs)} (scored)")
     tried = 0
-    for i in range(min(10, len(cand))):
-        for j in range(i+1, min(i+1+10, len(cand))):
-            a, b = cand[i], cand[j]
+    for i in range(min(8, len(inputs))):
+        for j in range(i+1, min(i+1+8, len(inputs))):
             tried += 1
-            ok = _try_pair(driver, a, b, start_str, end_str)
-            if ok:
-                time.sleep(0.5)  # 안정화
+            if _try_pair(driver, inputs[i], inputs[j], start_s, end_s):
+                time.sleep(0.4)
                 log(f"    · selected pair index: {i},{j}")
                 return
-    raise RuntimeError(f"적합한 날짜 입력 쌍을 찾지 못했습니다.(probe tried={tried})")
+    raise RuntimeError(f"적합한 날짜 입력쌍 실패(tried={tried})")
 
 def select_sido(driver: webdriver.Chrome, wanted: str) -> bool:
-    wanted = wanted.strip()
-    sels = driver.find_elements(By.TAG_NAME, "select")
-    for sel in sels:
+    for sel in driver.find_elements(By.TAG_NAME, "select"):
         try:
             for o in sel.find_elements(By.TAG_NAME, "option"):
                 if o.text.strip() == wanted:
                     o.click(); time.sleep(0.2)
-                    log(f"  - select_sido({wanted}): True")
-                    return True
+                    log(f"  - select_sido({wanted}): True"); return True
         except Exception:
             pass
     log(f"  - select_sido({wanted}): False")
     return False
 
-# ---------- 다운로드 버튼 ----------
-def find_download_button_simple(driver: webdriver.Chrome, wait_sec: float = BUTTON_APPEAR_WAIT):
-    end_time = time.time() + wait_sec
-    while time.time() < end_time:
+# ---------------- 엑셀 버튼 찾기(예전 감각 + 보강) ----------------
+def _scroll_probe(driver):
+    try:
+        driver.execute_script("window.scrollTo(0,0);"); time.sleep(0.1)
+        driver.execute_script("window.scrollBy(0,500);"); time.sleep(0.1)
+        driver.execute_script("window.scrollTo(0, document.body.scrollHeight);"); time.sleep(0.1)
+        driver.execute_script("window.scrollBy(0,-300);"); time.sleep(0.1)
+    except Exception:
+        pass
+
+def _visible_one(elems):
+    for e in elems:
         try:
-            els = driver.find_elements(By.CSS_SELECTOR, 'a[href*=".xlsx"],a[href*=".xls"]')
-            vis = [e for e in els if e.is_displayed()]
-            if vis:
-                return vis[0]
-            for sel in ["#excel", "#btnExcel", ".btn-excel", ".excel", "a[download]"]:
-                try:
-                    el = driver.find_element(By.CSS_SELECTOR, sel)
-                    if el.is_displayed():
-                        return el
-                except Exception:
-                    pass
+            if e.is_displayed(): return e
         except Exception:
             pass
+    return None
+
+def find_download_button(driver: webdriver.Chrome, wait_sec: float = BUTTON_APPEAR_WAIT):
+    t0 = time.time()
+    xpaths = [
+        # 직접 엑셀/EXCEL 텍스트
+        "//a[contains(text(),'엑셀') or contains(@title,'엑셀') or contains(text(),'EXCEL')]",
+        "//button[contains(text(),'엑셀') or contains(@title,'엑셀') or contains(text(),'EXCEL')]",
+        # id/class 관용명
+        "//*[@id='excel' or @id='btnExcel' or contains(@class,'btn-excel') or contains(@class,'excel')]",
+        # href 패턴
+        "//a[contains(@href,'.xlsx') or contains(@href,'.xls') or contains(@href,'excel')]",
+    ]
+    csses = [
+        'a[href*=".xlsx"],a[href*=".xls"]',
+        "#excel, #btnExcel, .btn-excel, .excel, a[download]"
+    ]
+    while time.time() - t0 < wait_sec:
+        # 1) CSS 빠른 탐색
+        for css in csses:
+            try:
+                cand = driver.find_elements(By.CSS_SELECTOR, css)
+                btn = _visible_one(cand)
+                if btn: return btn
+            except Exception:
+                pass
+        # 2) XPath 폭넓게
+        for xp in xpaths:
+            try:
+                cand = driver.find_elements(By.XPATH, xp)
+                btn = _visible_one(cand)
+                if btn: return btn
+            except Exception:
+                pass
+        _scroll_probe(driver)
         time.sleep(0.3)
     return None
 
-def _try_click(driver: webdriver.Chrome, el) -> bool:
+def _try_click(driver, el) -> bool:
     try:
         driver.execute_script("arguments[0].scrollIntoView({block:'center'});", el)
         time.sleep(0.05)
@@ -229,15 +231,13 @@ def _try_click(driver: webdriver.Chrome, el) -> bool:
     except Exception:
         return False
 
-# ---------- 다운로드 감시 ----------
-def _snapshot_files(download_dir: Path) -> set[Path]:
-    return set(download_dir.glob("*"))
-
-def _new_files_since(download_dir: Path, before: set[Path]) -> List[Path]:
-    now = set(download_dir.glob("*"))
+# ---------------- 다운로드 감시 ----------------
+def _snapshot_files(d: Path) -> set[Path]: return set(d.glob("*"))
+def _new_files_since(d: Path, before: set[Path]) -> List[Path]:
+    now = set(d.glob("*"))
     return sorted([p for p in now - before if p.is_file()], key=lambda p: p.stat().st_mtime)
 
-def _wait_download_finish(download_dir: Path, before: set[Path], timeout: int = DOWNLOAD_TIMEOUT_FINISH) -> Path:
+def _wait_download_finish(download_dir: Path, before: set[Path], timeout: int) -> Path:
     t0 = time.time()
     while time.time() - t0 < timeout:
         new_files = _new_files_since(download_dir, before)
@@ -247,8 +247,8 @@ def _wait_download_finish(download_dir: Path, before: set[Path], timeout: int = 
         time.sleep(0.5)
     raise TimeoutError("다운로드 완료 대기 초과")
 
-def click_and_detect_start(driver: webdriver.Chrome, download_dir: Path, start_detect_sec=START_DETECT_SEC) -> Optional[set]:
-    btn = find_download_button_simple(driver, wait_sec=BUTTON_APPEAR_WAIT)
+def click_and_detect_start(driver: webdriver.Chrome, download_dir: Path, start_detect_sec: int) -> Optional[set]:
+    btn = find_download_button(driver, wait_sec=BUTTON_APPEAR_WAIT)
     if not btn:
         return None
     if not _try_click(driver, btn):
@@ -261,13 +261,13 @@ def click_and_detect_start(driver: webdriver.Chrome, download_dir: Path, start_d
         time.sleep(0.5)
     return None
 
-def download_with_retry(driver: webdriver.Chrome, download_dir: Path, max_try=CLICK_MAX_TRY) -> Path:
+def download_with_retry(driver: webdriver.Chrome, download_dir: Path, max_try: int) -> Path:
     for i in range(1, max_try+1):
-        before = click_and_detect_start(driver, download_dir, start_detect_sec=START_DETECT_SEC)
-        log(f"  - click_download(excel) / attempt {i}: {bool(before)}")
-        if before:
+        started = click_and_detect_start(driver, download_dir, START_DETECT_SEC)
+        log(f"  - click_download(excel) / attempt {i}: {bool(started)}")
+        if started:
             try:
-                got = _wait_download_finish(download_dir, before, timeout=DOWNLOAD_TIMEOUT_FINISH)
+                got = _wait_download_finish(download_dir, started, DOWNLOAD_TIMEOUT_FINISH)
                 log(f"  - got file: {got}  size={got.stat().st_size:,}  ext={got.suffix}")
                 return got
             except TimeoutError as e:
@@ -278,7 +278,7 @@ def download_with_retry(driver: webdriver.Chrome, download_dir: Path, max_try=CL
                 driver.refresh(); time.sleep(1.0)
     raise TimeoutError(f"다운로드 시작 감지 실패({max_try}회 초과)")
 
-# ---------- 표 읽기/전처리/피벗 ----------
+# ---------------- 파싱/전처리/피벗 ----------------
 def _read_html_table(path: Path) -> pd.DataFrame:
     tables = pd.read_html(str(path), flavor="bs4", thousands=",", displayed_only=False)
     for t in tables:
@@ -296,24 +296,20 @@ def _read_html_table(path: Path) -> pd.DataFrame:
 
 def read_table(path: Path) -> pd.DataFrame:
     ext = path.suffix.lower()
-    if ext in (".xlsx", ".xls"):
+    if ext in (".xlsx",".xls"):
         try:
             df0 = pd.read_excel(path, header=None, dtype=str, engine="openpyxl" if ext==".xlsx" else None)
         except Exception:
             return _read_html_table(path)
-        hdr_idx = None
-        max_scan = min(80, len(df0))
-        for i in range(max_scan):
+        hdr = None
+        for i in range(min(80, len(df0))):
             row = df0.iloc[i].astype(str).str.strip().tolist()
-            if not row: continue
-            if row[0].upper() in ("NO","NO.","No","no"):
-                hdr_idx = i; break
-            if ("시군구" in row) and ("단지명" in row):
-                hdr_idx = i; break
-        if hdr_idx is None:
+            if row and (row[0].upper() in ("NO","NO.","No","no") or (("시군구" in row) and ("단지명" in row))):
+                hdr = i; break
+        if hdr is None:
             return _read_html_table(path)
-        cols = df0.iloc[hdr_idx].astype(str).str.strip()
-        df = df0.iloc[hdr_idx+1:].copy()
+        cols = df0.iloc[hdr].astype(str).str.strip()
+        df = df0.iloc[hdr+1:].copy()
         df.columns = cols
         return df.reset_index(drop=True)
     return _read_html_table(path)
@@ -321,29 +317,30 @@ def read_table(path: Path) -> pd.DataFrame:
 def clean_df(df: pd.DataFrame, split_month: bool) -> pd.DataFrame:
     if "시군구 " in df.columns and "시군구" not in df.columns:
         df = df.rename(columns={"시군구 ":"시군구"})
-    rename_map = {}
+    ren = {}
     for c in df.columns:
-        k = str(c).replace(" ", "")
-        if k == "거래금액(만원)" and c != "거래금액(만원)": rename_map[c] = "거래금액(만원)"
-        if k == "전용면적(㎡)" and c != "전용면적(㎡)": rename_map[c] = "전용면적(㎡)"
-    if rename_map: df = df.rename(columns=rename_map)
+        k = str(c).replace(" ","")
+        if k == "거래금액(만원)" and c != "거래금액(만원)": ren[c] = "거래금액(만원)"
+        if k == "전용면적(㎡)" and c != "전용면적(㎡)": ren[c] = "전용면적(㎡)"
+    if ren: df = df.rename(columns=ren)
+    # NO 열 제거
     for c in list(df.columns):
         if str(c).strip().upper() == "NO":
-            df = df[df[c].notna()]
-            df = df.drop(columns=[c])
+            df = df[df[c].notna()].drop(columns=[c])
+    # 숫자화
     for c in ["거래금액(만원)","전용면적(㎡)"]:
         if c in df.columns:
-            df[c] = (df[c].astype(str)
-                           .str.replace(",", "", regex=False)
-                           .str.replace(" ", "", regex=False)
-                           .str.replace("-", "", regex=False)
-                           .replace({"": np.nan}))
+            df[c] = (df[c].astype(str).str.replace(",","",regex=False)
+                               .str.replace(" ","",regex=False)
+                               .str.replace("-","",regex=False)
+                               .replace({"": np.nan}))
             df[c] = pd.to_numeric(df[c], errors="coerce")
+    # 시군구 분해
     if "시군구" in df.columns:
         parts = df["시군구"].astype(str).str.split(expand=True, n=2)
-        for i, name in enumerate(["광역","구","법정동"]):
-            if parts.shape[1] > i: df[name] = parts[i].fillna("")
-            else: df[name] = ""
+        for i,name in enumerate(["광역","구","법정동"]):
+            df[name] = parts[i] if parts.shape[1] > i else ""
+    # 계약월 분해(서울 피벗용)
     if split_month and "계약년월" in df.columns:
         s = df["계약년월"].astype(str).str.replace(r"\D","", regex=True)
         df["계약년"] = s.str.slice(0,4)
@@ -351,42 +348,42 @@ def clean_df(df: pd.DataFrame, split_month: bool) -> pd.DataFrame:
     return df.reset_index(drop=True)
 
 def pivot_national(df: pd.DataFrame) -> pd.DataFrame:
-    if "광역" in df.columns:
+    if "광역" in df.columns and "거래금액(만원)" in df.columns:
         pv = df.pivot_table(index="광역", values="거래금액(만원)", aggfunc="count").rename(columns={"거래금액(만원)":"건수"})
         return pv.reset_index()
     return pd.DataFrame()
 
 def pivot_seoul(df: pd.DataFrame) -> pd.DataFrame:
-    if {"구","계약월"}.issubset(df.columns):
+    if {"구","계약월","거래금액(만원)"}.issubset(df.columns):
         pv = df.pivot_table(index="구", columns="계약월", values="거래금액(만원)", aggfunc="count", fill_value=0)
         pv = pv.sort_index(axis=1)
         return pv.reset_index()
     return pd.DataFrame()
 
-def save_excel(path: Path, df: pd.DataFrame, pivot: Optional[pd.DataFrame], pivot_name="피벗"):
+def save_excel(path: Path, df: pd.DataFrame, pv: Optional[pd.DataFrame], pivot_name="피벗"):
     with pd.ExcelWriter(path, engine="openpyxl") as xw:
         df.to_excel(xw, index=False, sheet_name="data")
-        if pivot is not None and not pivot.empty:
-            pivot.to_excel(xw, index=False, sheet_name=pivot_name)
+        if pv is not None and not pv.empty:
+            pv.to_excel(xw, index=False, sheet_name=pivot_name)
 
-# ---------- Google Sheets ----------
+# ---------------- Sheets / Drive ----------------
 def load_service_account() -> Optional[dict]:
     if not SA_PATH or not Path(SA_PATH).exists():
         log("  ! service account not found; skip Drive/Sheets.")
         return None
     try:
         with open(SA_PATH, "r", encoding="utf-8") as f:
-            data = json.load(f)
+            data = json.load(f)  # JSON 오류면 여기서 에러 → 스킵
         log("  - SA loaded.")
         return data
     except Exception as e:
         log(f"  ! service account load failed: {e}")
         return None
 
-_gspread = None
+_gs = None
 def get_gspread_client():
-    global _gspread
-    if _gspread is not None: return _gspread
+    global _gs
+    if _gs is not None: return _gs
     sa = load_service_account()
     if not sa: return None
     try:
@@ -398,22 +395,22 @@ def get_gspread_client():
             "https://www.googleapis.com/auth/drive.file",
         ]
         creds = Credentials.from_service_account_info(sa, scopes=scopes)
-        _gspread = gspread.authorize(creds)
-        return _gspread
+        _gs = gspread.authorize(creds)
+        return _gs
     except Exception as e:
         log(f"  ! gspread init failed: {e}")
         return None
 
-def ensure_worksheet(spread, title: str):
+def ensure_ws(spread, title: str):
     try: return spread.worksheet(title)
     except Exception: return spread.add_worksheet(title=title, rows=2000, cols=200)
 
-def upsert_table_by_keys(ws, key_name: str, keys: List[str], col_label: str, values: Dict[str,int]):
+def upsert_table(ws, key_name: str, keys: List[str], col_label: str, mapping: Dict[str,int]):
     import gspread
     matrix = ws.get_all_values()
     if not matrix:
         header = [key_name, col_label]
-        rows = [[k, values.get(k, "")] for k in keys]
+        rows = [[k, mapping.get(k,"")] for k in keys]
         ws.update("A1", [header] + rows)
         return
     header = matrix[0]
@@ -421,59 +418,58 @@ def upsert_table_by_keys(ws, key_name: str, keys: List[str], col_label: str, val
         header = [key_name] + header[1:]
         ws.update("A1", [header])
     try:
-        col_idx = header.index(col_label)
+        cidx = header.index(col_label)
     except ValueError:
-        col_idx = len(header)
+        cidx = len(header)
         header.append(col_label)
         ws.update("A1", [header])
-    existing_keys = {row[0]: i for i, row in enumerate(matrix[1:], start=2) if row}
-    new_rows = []
-    for k in keys:
-        if k not in existing_keys: new_rows.append([k])
+    existing = {row[0]: i for i,row in enumerate(matrix[1:], start=2) if row}
+    new_rows = [[k] for k in keys if k not in existing]
     if new_rows:
         ws.append_rows(new_rows, value_input_option="USER_ENTERED")
         matrix = ws.get_all_values()
-        existing_keys = {row[0]: i for i, row in enumerate(matrix[1:], start=2) if row}
+        existing = {row[0]: i for i,row in enumerate(matrix[1:], start=2) if row}
     updates = []
     for k in keys:
-        r = existing_keys[k]; c = col_idx + 1; val = values.get(k, "")
-        updates.append({"range": f"{gspread.utils.rowcol_to_a1(r, c)}", "values": [[val]]})
+        r = existing[k]; c = cidx+1; val = mapping.get(k, "")
+        updates.append({"range": gspread.utils.rowcol_to_a1(r,c), "values":[[val]]})
     if updates:
         ws.batch_update([{"range": u["range"], "values": u["values"]} for u in updates], value_input_option="USER_ENTERED")
 
-def write_national_to_sheets(spread, base_month: date, pv: pd.DataFrame):
-    if pv.empty:
-        log("  - sheets: national pivot empty -> skip"); return
+def write_national(spread, base_month: date, pv: pd.DataFrame):
+    if pv.empty: 
+        log("  - sheets: national empty → skip"); return
     title = f"전국 {base_month.year%100:02d}년 {base_month.month}월"
-    ws = ensure_worksheet(spread, title)
-    keys = sorted(pv["광역"].astype(str).tolist())
-    values = dict(zip(pv["광역"].astype(str), pv["건수"].astype(int)))
+    ws = ensure_ws(spread, title)
+    keys = sorted(pv["광역"].astype(str))
+    vals = dict(zip(pv["광역"].astype(str), pv["건수"].astype(int)))
     col_label = yymmdd(TODAY)
-    upsert_table_by_keys(ws, "광역", keys, col_label, values)
-    log(f"  - sheets: wrote national -> [{title}] {col_label}")
+    upsert_table(ws, "광역", keys, col_label, vals)
+    log(f"  - sheets: wrote national → [{title}] {col_label}")
 
-def month_year_map(start: date, end: date) -> Dict[str, int]:
-    d = month_first(start); m = {}
+def month_year_map(start: date, end: date) -> Dict[str,int]:
+    d = month_first(start)
+    m = {}
     while d <= end:
         m[f"{d.month:02d}"] = d.year
         d = shift_months(d, +1)
     return m
 
-def write_seoul_to_sheets(spread, start: date, end: date, pv: pd.DataFrame):
+def write_seoul(spread, start: date, end: date, pv: pd.DataFrame):
     if pv.empty:
-        log("  - sheets: seoul pivot empty -> skip"); return
+        log("  - sheets: seoul empty → skip"); return
     mymap = month_year_map(start, end)
-    keys = sorted(pv["구"].astype(str).tolist())
+    keys = sorted(pv["구"].astype(str))
     col_label = yymmdd(TODAY)
     for col in pv.columns:
         if col == "구": continue
         mm = str(col).zfill(2); yr = mymap.get(mm)
         if not yr: continue
         title = f"서울 {yr%100:02d}년 {int(mm)}월"
-        ws = ensure_worksheet(spread, title)
+        ws = ensure_ws(spread, title)
         vals = dict(zip(pv["구"].astype(str), pv[col].astype(int)))
-        upsert_table_by_keys(ws, "구", keys, col_label, vals)
-        log(f"  - sheets: wrote seoul -> [{title}] {col_label}")
+        upsert_table(ws, "구", keys, col_label, vals)
+        log(f"  - sheets: wrote seoul → [{title}] {col_label}")
 
 def upload_to_drive(sa_info: dict, filepath: Path, folder_id: str) -> Optional[str]:
     if not folder_id: return None
@@ -485,14 +481,14 @@ def upload_to_drive(sa_info: dict, filepath: Path, folder_id: str) -> Optional[s
         creds = Credentials.from_service_account_info(sa_info, scopes=scopes)
         drive = build("drive", "v3", credentials=creds)
         media = MediaFileUpload(str(filepath), mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-        file_metadata = {"name": filepath.name, "parents": [folder_id]}
-        res = drive.files().create(body=file_metadata, media_body=media, fields="id,name").execute()
+        meta = {"name": filepath.name, "parents":[folder_id]}
+        res = drive.files().create(body=meta, media_body=media, fields="id,name").execute()
         return res.get("id")
     except Exception as e:
         log(f"  ! drive error: {e}")
         return None
 
-# ---------- 메인 프로세스 ----------
+# ---------------- 메인 루틴 ----------------
 def fetch_and_process(driver: webdriver.Chrome,
                       sido: Optional[str],
                       start: date, end: date,
@@ -501,19 +497,17 @@ def fetch_and_process(driver: webdriver.Chrome,
                       spread=None,
                       sa_info: Optional[dict]=None):
     driver.get(URL)
-    try:
-        WebDriverWait(driver, 5).until(lambda d: d.find_elements(By.TAG_NAME, "body"))
-    except TimeoutException:
-        pass
+    time.sleep(0.8)  # 페이지 초기 안정화(예전 느낌)
 
     set_dates(driver, start, end)
-    if sido: select_sido(driver, sido)
+    if sido:
+        select_sido(driver, sido)
 
     got = download_with_retry(driver, TMP_DL, max_try=CLICK_MAX_TRY)
 
     df_raw = read_table(got)
     df = clean_df(df_raw, split_month=(pivot_mode=="seoul"))
-    pv = pivot_national(df) if pivot_mode=="national" else pivot_seoul(df)
+    pv = (pivot_national(df) if pivot_mode=="national" else pivot_seoul(df))
 
     out = SAVE_DIR / outname
     save_excel(out, df, pv)
@@ -526,12 +520,12 @@ def fetch_and_process(driver: webdriver.Chrome,
 
     if spread:
         if pivot_mode == "national":
-            write_national_to_sheets(spread, base_month=start, pv=pv)
+            write_national(spread, base_month=start, pv=pv)
         else:
-            write_seoul_to_sheets(spread, start=start, end=end, pv=pv)
+            write_seoul(spread, start=start, end=end, pv=pv)
 
 def main():
-    # Sheets/Drive는 SA JSON이 정상일 때만
+    # Sheets/Drive는 SA가 온전할 때만
     gs = get_gspread_client()
     spread = None
     if gs and SHEET_ID:
@@ -545,23 +539,27 @@ def main():
     driver = build_driver(TMP_DL)
     try:
         t = TODAY
+        # 최근 3개월(말일은 해당월 말이나 오늘 중 작은 값)
         months = [shift_months(month_first(t), k) for k in [0, -1, -2]]
         months.sort()
         for base in months:
             start = base
-            end = min(shift_months(base, +1) - timedelta(days=1), t)
-            name = f"전국 {yymm(base)}_{yymmdd(t)}.xlsx"
+            end   = min(shift_months(base, +1) - timedelta(days=1), t)
+            name  = f"전국 {yymm(base)}_{yymmdd(t)}.xlsx"
             log(f"[전국] {start.isoformat()} ~ {end.isoformat()} → {name}")
-            fetch_and_process(driver, None, start, end, name, pivot_mode="national", spread=spread, sa_info=sa_info)
+            fetch_and_process(driver, None, start, end, name, pivot_mode="national",
+                              spread=spread, sa_info=sa_info)
             time.sleep(COOLDOWN_BETWEEN_FILES)
 
+        # 서울: (해당월 기준) 전년도 10/1 ~ 오늘
         year0 = t.year - 1
         start_seoul = date(year0, 10, 1)
-        if start_seoul > t: start_seoul = date(t.year, 1, 1)
+        if start_seoul > t:
+            start_seoul = date(t.year, 1, 1)
         name_seoul = f"서울시 {yymmdd(t)}.xlsx"
-        log(f"[서울] {start_seoul.isoformat()} ~ {t.isoformat()} → {name_se올}")
-        fetch_and_process(driver, "서울특별시", start_seoul, t, name_seoul, pivot_mode="seoul", spread=spread, sa_info=sa_info)
-
+        log(f"[서울] {start_seoul.isoformat()} ~ {t.isoformat()} → {name_seoul}")
+        fetch_and_process(driver, "서울특별시", start_seoul, t, name_seoul, pivot_mode="seoul",
+                          spread=spread, sa_info=sa_info)
     finally:
         try: driver.quit()
         except Exception: pass
