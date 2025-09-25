@@ -4,8 +4,6 @@ rt_allinone.py
 - rt.molit.go.kr 조건별 자료제공 페이지에서 월별/지역별 데이터를 자동 다운로드
 - 다운로드 시작 감지 실패 시 즉시 다음 시도(시작감지 20초, 최대 15회)
 - 전처리 후 엑셀 저장 + Google Sheets에 누적 기록
-  * 전국: "전국 YY년 M월" 시트에 [광역 x 날짜(YYMMDD)] 누적
-  * 서울: "서울 YY년 M월" 시트에 [구 x 날짜(YYMMDD)] 누적
 """
 
 from __future__ import annotations
@@ -17,10 +15,8 @@ from typing import Optional, Tuple, List, Dict
 import pandas as pd
 import numpy as np
 
-# -------------------------
-# 환경/경로
-# -------------------------
 URL = "https://rt.molit.go.kr/pt/xls/xls.do?mobileAt="
+
 ROOT = Path.cwd()
 SAVE_DIR = ROOT / "output"
 TMP_DL   = ROOT / "_rt_downloads"
@@ -51,9 +47,7 @@ def shift_months(d: date, k: int) -> date:
     end = (date(y, m2, 1) + timedelta(days=40)).replace(day=1) - timedelta(days=1)
     return date(y, m2, min(d.day, end.day))
 
-# -------------------------
-# Selenium
-# -------------------------
+# ---------------- Selenium ----------------
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
@@ -88,9 +82,7 @@ def build_driver(download_dir: Path) -> webdriver.Chrome:
     driver.set_window_size(1400, 900)
     return driver
 
-# -------------------------
-# 페이지 조작
-# -------------------------
+# --------------- 페이지 조작 ---------------
 def find_date_inputs(driver: webdriver.Chrome) -> Tuple:
     inputs = driver.find_elements(By.CSS_SELECTOR, "input")
     cands = []
@@ -146,34 +138,7 @@ def _close_alert_if_any(driver: webdriver.Chrome):
     except TimeoutException:
         pass
 
-# ---------- 새로 강화: 다운로드 버튼 탐색 ----------
-DL_XPATHS = [
-    # 텍스트계
-    "//button[contains(.,'EXCEL') and (contains(.,'다운') or contains(.,'로드'))]",
-    "//button[contains(.,'엑셀') and (contains(.,'다운') or contains(.,'로드'))]",
-    "//a[contains(.,'EXCEL') and (contains(.,'다운') or contains(.,'로드'))]",
-    "//a[contains(.,'엑셀') and (contains(.,'다운') or contains(.,'로드'))]",
-    "//input[(translate(@value,'excelEXCEL','excelexcel')='excel' or contains(translate(@value,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'excel'))]",
-    "//input[(contains(.,'EXCEL') or contains(@value,'EXCEL') or contains(@title,'EXCEL'))]",
-    # 속성계(id/title/aria-label/onclick)
-    "//*[@id][contains(translate(@id,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'excel')]",
-    "//*[@title][contains(translate(@title,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'excel')]",
-    "//*[@aria-label][contains(translate(@aria-label,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'excel')]",
-    "//*[@onclick][contains(translate(@onclick,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'excel')]",
-]
-
-def _query_download_candidates(driver: webdriver.Chrome):
-    elems: List = []
-    for xp in DL_XPATHS:
-        try:
-            found = driver.find_elements(By.XPATH, xp)
-            for el in found:
-                if el not in elems:
-                    elems.append(el)
-        except Exception:
-            pass
-    return elems
-
+# ----- 다운로드 버튼 탐색(강화판) -----
 def _try_click(driver: webdriver.Chrome, el) -> bool:
     try:
         driver.execute_script("arguments[0].scrollIntoView({block:'center'});", el)
@@ -189,50 +154,66 @@ def _try_click(driver: webdriver.Chrome, el) -> bool:
     except Exception:
         return False
 
-def _switch_to_default(driver: webdriver.Chrome):
+def _find_button_js_current_frame(driver: webdriver.Chrome):
+    """현재 프레임에서 JS로 버튼/링크/인풋을 텍스트/속성으로 스캔."""
+    script = r"""
+    const tests = (s)=>/(엑셀|EXCEL|excel|다운|내려받기)/i.test(s||"");
+    const all = Array.from(document.querySelectorAll('button,a,input,[role="button"]'));
+    // 우선순위 1: 텍스트
+    let el = all.find(e => tests(e.innerText));
+    if (el) return el;
+    // 우선순위 2: value/title/aria-label/onclick
+    el = all.find(e => tests(e.value)||tests(e.title)||tests(e.getAttribute('aria-label'))||tests(e.getAttribute('onclick')));
+    if (el) return el;
+    // 우선순위 3: id/class
+    el = all.find(e => tests(e.id)||tests(e.className));
+    if (el) return el;
+    // 우선순위 4: href에 xls/xlsx
+    el = all.find(e => {
+        const h = (e.getAttribute('href')||'').toLowerCase();
+        return h.includes('.xls') || h.includes('.xlsx');
+    });
+    if (el) return el;
+    return null;
+    """
     try:
-        driver.switch_to.default_content()
+        el = driver.execute_script(script)
+        return el
     except Exception:
-        pass
+        return None
 
-def _switch_to_iframe_with_button(driver: webdriver.Chrome) -> bool:
-    """버튼이 iframe 안에 있을 수 있으므로, 모든 top-level iframe을 순회해 버튼 존재 프레임으로 진입."""
-    _switch_to_default(driver)
-    # 1) 먼저 본문에서 찾아본다
-    if _query_download_candidates(driver):
-        return True
-    # 2) iframe 순회
-    iframes = driver.find_elements(By.TAG_NAME, "iframe")
-    for i, fr in enumerate(iframes):
+def _find_download_button_recursive(driver: webdriver.Chrome, depth=0, max_depth=5):
+    """본문 → 재귀적으로 iframe 순회하면서 버튼 탐색."""
+    if depth > max_depth:
+        return None, False
+    # 현재 프레임에서 시도
+    el = _find_button_js_current_frame(driver)
+    if el: 
+        return el, True
+    # 하위 iframe 순회
+    frames = driver.find_elements(By.TAG_NAME, "iframe")
+    for idx, fr in enumerate(frames):
         try:
             driver.switch_to.frame(fr)
-            if _query_download_candidates(driver):
-                return True
-            driver.switch_to.default_content()
+            found, ok = _find_download_button_recursive(driver, depth+1, max_depth)
+            if found:
+                return found, True
+            driver.switch_to.parent_frame()
         except Exception:
-            _switch_to_default(driver)
-    # 못 찾으면 기본으로 복귀
-    _switch_to_default(driver)
-    return False
+            try: driver.switch_to.parent_frame()
+            except Exception: pass
+            continue
+    return None, False
 
 def _find_download_button(driver: webdriver.Chrome):
-    """강화된 버튼 탐색: 본문→iframe 순회→본문 재확인"""
-    # 본문에서
-    _switch_to_default(driver)
-    elems = _query_download_candidates(driver)
-    if elems:
-        return elems[0]
-    # iframe 진입
-    if _switch_to_iframe_with_button(driver):
-        elems = _query_download_candidates(driver)
-        if elems:
-            return elems[0]
-    # 마지막으로 본문 재확인(동적 렌더 대비)
-    _switch_to_default(driver)
-    elems = _query_download_candidates(driver)
-    return elems[0] if elems else None
-# ---------- 끝: 버튼 탐색 강화 ----------
+    # 기본 문서로 복귀
+    try: driver.switch_to.default_content()
+    except Exception: pass
+    el, ok = _find_download_button_recursive(driver, depth=0, max_depth=5)
+    # 찾으면 그 프레임 컨텍스트에 이미 들어와 있음
+    return el
 
+# ------------- 파일 감시 -------------
 def _snapshot_files(download_dir: Path) -> set[Path]:
     return set(download_dir.glob("*"))
 
@@ -252,9 +233,7 @@ def _wait_download_finish(download_dir: Path, before: set[Path], timeout: int = 
     raise TimeoutError("다운로드 완료 대기 초과")
 
 def click_and_detect_start(driver: webdriver.Chrome, download_dir: Path, start_detect_sec=START_DETECT_SEC) -> Optional[set]:
-    """버튼 클릭 후 20초 내 '다운로드 시작'(신규 파일 생성) 감지. 실패 시 None."""
     _close_alert_if_any(driver)
-    # 버튼이 iframe 안에 있을 수 있으니 전환 포함 탐색
     btn = _find_download_button(driver)
     if not btn:
         return None
@@ -284,13 +263,12 @@ def download_with_retry(driver: webdriver.Chrome, download_dir: Path, max_try=CL
                 log(f"  ! 완료 대기 초과: {e}")
                 driver.refresh(); time.sleep(1.5)
         else:
+            # 시작 감지도 못했으면 바로 다음 시도, 가끔 새로고침
             if i % 5 == 0:
                 driver.refresh(); time.sleep(1.0)
     raise TimeoutError(f"다운로드 시작 감지 실패({max_try}회 초과)")
 
-# -------------------------
-# 전처리
-# -------------------------
+# --------------- 전처리 ---------------
 def _read_html_table(path: Path) -> pd.DataFrame:
     tables = pd.read_html(str(path), flavor="bs4", thousands=",", displayed_only=False)
     for t in tables:
@@ -388,9 +366,7 @@ def save_excel(path: Path, df: pd.DataFrame, pivot: Optional[pd.DataFrame], pivo
         if pivot is not None and not pivot.empty:
             pivot.to_excel(xw, index=False, sheet_name=pivot_name)
 
-# -------------------------
-# Google Sheets
-# -------------------------
+# --------------- Google Sheets ---------------
 def load_service_account() -> Optional[dict]:
     if not SA_PATH or not Path(SA_PATH).exists():
         log("  ! service account not found; skip Drive/Sheets.")
@@ -497,9 +473,7 @@ def write_seoul_to_sheets(spread, start: date, end: date, pv: pd.DataFrame):
         upsert_table_by_keys(ws, "구", keys, col_label, vals)
         log(f"  - sheets: wrote seoul -> [{title}] {col_label}")
 
-# -------------------------
-# Drive (옵션)
-# -------------------------
+# --------------- Drive (옵션) ---------------
 def upload_to_drive(sa_info: dict, filepath: Path, folder_id: str) -> Optional[str]:
     if not folder_id: return None
     try:
@@ -517,9 +491,7 @@ def upload_to_drive(sa_info: dict, filepath: Path, folder_id: str) -> Optional[s
         log(f"  ! drive error: {e}")
         return None
 
-# -------------------------
-# 파이프라인
-# -------------------------
+# --------------- 파이프라인 ---------------
 def fetch_and_process(driver: webdriver.Chrome,
                       sido: Optional[str],
                       start: date, end: date,
@@ -528,7 +500,6 @@ def fetch_and_process(driver: webdriver.Chrome,
                       spread=None,
                       sa_info: Optional[dict]=None):
     driver.get(URL)
-    # 페이지 기초 안정화
     try:
         WebDriverWait(driver, 5).until(lambda d: d.find_elements(By.TAG_NAME, "body"))
     except TimeoutException:
@@ -586,7 +557,7 @@ def main():
         start_seoul = date(year0, 10, 1)
         if start_seoul > t: start_seoul = date(t.year, 1, 1)
         name_seoul = f"서울시 {yymmdd(t)}.xlsx"
-        log(f"[서울] {start_seoul.isoformat()} ~ {t.isoformat()} → {name_seoul}")
+        log(f"[서울] {start_se울} ~ {t.isoformat()} → {name_seoul}")
         fetch_and_process(driver, "서울특별시", start_seoul, t, name_seoul, pivot_mode="seoul", spread=spread, sa_info=sa_info)
 
     finally:
