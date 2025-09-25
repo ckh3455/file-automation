@@ -9,12 +9,13 @@ on:
 jobs:
   run:
     runs-on: ubuntu-latest
+    timeout-minutes: 90
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # 크롬 & 크롬드라이버 설치 (Ubuntu, headless 용)
+      # 크롬/드라이버 설치 (snap이라 시간이 좀 걸립니다)
       - name: Install Chromium & Chromedriver
         run: |
           sudo apt-get update
@@ -32,68 +33,28 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run job (download + preprocess + upload + write to Sheets)
-        env:
-          SHEET_ID: ${{ secrets.SHEET_ID }}
-          DRIVE_FOLDER_ID: ${{ secrets.DRIVE_FOLDER_ID }}
-          SA_PATH:  ${{ github.workspace }}/sa.json
-          CHROME_BIN: /usr/bin/chromium-browser
-          CHROMEDRIVER_BIN: /usr/bin/chromedriver
-          PYTHONUNBUFFERED: "1"
-          TZ: Asia/Seoul
-        run: |
-          python -V
-          /usr/bin/chromium-browser --version || true
-          /usr/bin/chromedriver --version || true
-          python -u rt_allinone.py   # <= 여기 -u
-
-
-      # 서비스계정 키 JSON을 sa.json 파일로 저장
+      # 서비스계정 JSON을 sa.json로 저장 (멀티라인을 안전하게 처리)
       - name: Write service account json
+        shell: bash
         run: |
-          printf "%s" "${{ secrets.GDRIVE_SA_JSON }}" > sa.json
-
-      # (선택) 크롬 스모크 테스트 - 드라이버/헤드리스 정상동작 여부 빠르게 확인
-      - name: Smoke test Chrome
-        env:
-          CHROME_BIN: /usr/bin/chromium-browser
-          CHROMEDRIVER_BIN: /usr/bin/chromedriver
-          PYTHONUNBUFFERED: "1"
-        run: |
-          python - <<'PY'
-          import os
-          from selenium import webdriver
-          from selenium.webdriver.chrome.options import Options
-          from selenium.webdriver.chrome.service import Service
-          o=Options()
-          o.add_argument("--headless=new")
-          o.add_argument("--no-sandbox")
-          o.add_argument("--disable-dev-shm-usage")
-          o.binary_location=os.environ.get("CHROME_BIN")
-          s=Service(os.environ.get("CHROMEDRIVER_BIN"))
-          d=webdriver.Chrome(service=s, options=o)
-          print("SMOKE: chrome ok")
-          d.quit()
-          PY
+          cat > sa.json <<'JSON'
+          ${{ secrets.GDRIVE_SA_JSON }}
+          JSON
 
       - name: Run job (download + preprocess + upload + write to Sheets)
         env:
-          # 시크릿에서 주입되는 값들
           SHEET_ID: ${{ secrets.SHEET_ID }}
           DRIVE_FOLDER_ID: ${{ secrets.DRIVE_FOLDER_ID }}
-
-          # 워크스페이스 내 실제 파일 경로
           SA_PATH:  ${{ github.workspace }}/sa.json
-
-          # 크롬 경로 (위에서 export 한 값)
           CHROME_BIN: /usr/bin/chromium-browser
           CHROMEDRIVER_BIN: /usr/bin/chromedriver
-
-          # 로그 버퍼링 끄기 + KST 타임존
-          PYTHONUNBUFFERED: "1"
+          PYTHONUNBUFFERED: "1"   # 파이썬 버퍼링 끔
           TZ: Asia/Seoul
         run: |
+          set -e
+          echo "== versions =="
           python -V
           /usr/bin/chromium-browser --version || true
           /usr/bin/chromedriver --version || true
-          python -u rt_allinone.py
+          echo "== start script =="
+          python -u rt_allinone.py   # <-- 꼭 -u
