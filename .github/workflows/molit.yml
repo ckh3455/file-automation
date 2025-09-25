@@ -34,13 +34,18 @@ jobs:
         run: |
           echo "${{ secrets.GDRIVE_SA_JSON }}" > sa.json
 
-      - name: Run job
-        timeout-minutes: 20
-        env:
-          TZ: Asia/Seoul
-          CI: "1"
-          SA_PATH: ${{ github.workspace }}/sa.json
-          SHEET_ID: ${{ secrets.SHEET_ID }}             # (선택) 시트 연동 시 사용
-          DRIVE_FOLDER_ID: ${{ secrets.DRIVE_FOLDER_ID }} # (선택) GDrive 업로드 시 사용
-          DRIVE_RETENTION_DAYS: "3"                      # (선택)
-        run: python rt_allinone.py
+     - name: Run job (download + preprocess + upload + write to Sheets)
+  env:
+    SHEET_ID: ${{ secrets.SHEET_ID }}
+    DRIVE_FOLDER_ID: ${{ secrets.DRIVE_FOLDER_ID }}
+    SA_PATH: ${{ github.workspace }}/sa.json
+    CHROME_BIN: /usr/bin/chromium-browser
+    CHROMEDRIVER_BIN: /usr/bin/chromedriver
+    PYTHONUNBUFFERED: "1"   # 로그 버퍼링 끄기
+    TZ: Asia/Seoul
+  run: |
+    python -V
+    /usr/bin/chromium-browser --version || true
+    /usr/bin/chromedriver --version || true
+    python -u rt_allinone.py   # -u : unbuffered
+
