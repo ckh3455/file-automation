@@ -2,21 +2,18 @@ name: molit-daily
 
 on:
   schedule:
-    - cron: "5 0 * * *"   # 매일 09:05 KST
+    - cron: "5 0 * * *"   # 09:05 KST
   workflow_dispatch:
 
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 30     # 전체 잡 30분 안에 자동 종료
-    env:
-      CI: "1"               # CI 모드 스위치 (파이썬에서 읽음)
-
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install Chromium & Chromedriver
+      - name: Install Chromium
         run: |
           sudo apt-get update
           sudo apt-get install -y chromium-browser chromium-chromedriver
@@ -33,17 +30,17 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Write service account json
+      - name: Decode SA json
         run: |
-          printf "%s" "${{ secrets.GDRIVE_SA_JSON }}" > sa.json
+          echo "${{ secrets.GDRIVE_SA_JSON }}" > sa.json
 
-      - name: Run job (download + preprocess + upload + write to Sheets)
-        timeout-minutes: 20              # 파이썬 스텝 개별 타임아웃
+      - name: Run job
+        timeout-minutes: 20
         env:
           TZ: Asia/Seoul
+          CI: "1"
           SA_PATH: ${{ github.workspace }}/sa.json
-          DRIVE_FOLDER_ID: ${{ secrets.DRIVE_FOLDER_ID }}
-          DRIVE_RETENTION_DAYS: "3"
-          SHEET_ID: ${{ secrets.SHEET_ID }}
-        run: |
-          python rt_allinone.py
+          SHEET_ID: ${{ secrets.SHEET_ID }}             # (선택) 시트 연동 시 사용
+          DRIVE_FOLDER_ID: ${{ secrets.DRIVE_FOLDER_ID }} # (선택) GDrive 업로드 시 사용
+          DRIVE_RETENTION_DAYS: "3"                      # (선택)
+        run: python rt_allinone.py
