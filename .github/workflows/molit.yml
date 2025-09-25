@@ -14,6 +14,23 @@ jobs:
       PYTHONUNBUFFERED: "1"
 
     steps:
+    - name: Write service account json
+      run: |
+    set -euxo pipefail
+    # 1) 먼저 raw JSON인지 검사
+    if echo '${{ secrets.GDRIVE_SA_JSON }}' | jq . >/dev/null 2>&1; then
+      printf '%s' '${{ secrets.GDRIVE_SA_JSON }}' > sa.json
+      echo "✅ SA json written as raw JSON"
+    else
+      # 2) raw가 아니면 base64로 가정하고 디코딩
+      echo '${{ secrets.GDRIVE_SA_JSON }}' | base64 -d > sa.json || {
+        echo "❌ GDRIVE_SA_JSON is neither valid JSON nor base64"; exit 1;
+      }
+      echo "✅ SA json decoded from base64"
+    fi
+    # 간단 검증(내용은 노출 안 함)
+    jq -r '.client_email' sa.json | sed 's/.*/✅ SA client_email ok: &/'
+
       - name: Checkout
         uses: actions/checkout@v4
 
