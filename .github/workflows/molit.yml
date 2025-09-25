@@ -1,98 +1,10 @@
 name: molit-daily
-
 on:
-  schedule:
-    - cron: "5 0 * * *"   # 매일 09:05 KST (00:05 UTC)
   workflow_dispatch:
 
 jobs:
-  run:
+  smoke:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
-    env:
-      CI: "1"
-      PYTHONUNBUFFERED: "1"
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Print runner info
-        run: |
-          set -euxo pipefail
-          python --version
-          pip --version
-          uname -a
-
-      - name: Install Chromium & Chromedriver
-        run: |
-          set -euxo pipefail
-          sudo apt-get update
-          sudo apt-get install -y chromium-browser chromium-chromedriver
-          echo "CHROME_BIN=/usr/bin/chromium-browser" >> $GITHUB_ENV
-          echo "CHROMEDRIVER_BIN=/usr/bin/chromedriver" >> $GITHUB_ENV
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      # 필수 시크릿 존재 여부 확인 (괄호문법 수정 버전)
-      - name: Check required secrets
-        env:
-          GDRIVE_SA_JSON: ${{ secrets.GDRIVE_SA_JSON }}
-          DRIVE_FOLDER_ID: ${{ secrets.DRIVE_FOLDER_ID }}
-          SHEET_ID: ${{ secrets.SHEET_ID }}
-        run: |
-          set -e
-          [ -n "$GDRIVE_SA_JSON" ]  || { echo "❌ GDRIVE_SA_JSON is missing"; exit 1; }
-          [ -n "$DRIVE_FOLDER_ID" ] || { echo "❌ DRIVE_FOLDER_ID is missing"; exit 1; }
-          [ -n "$SHEET_ID" ]        || { echo "❌ SHEET_ID is missing"; exit 1; }
-          echo "✅ All required secrets exist."
-
-      - name: Install deps (capture pip log)
-        run: |
-          set -euxo pipefail
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt --default-timeout=120 -v 2>&1 | tee pip-install.log
-
-      - name: Write service account json
-        env:
-          GDRIVE_SA_JSON: ${{ secrets.GDRIVE_SA_JSON }}
-        run: |
-          set -euxo pipefail
-          printf "%s" "$GDRIVE_SA_JSON" > sa.json
-          python - << 'PY'
-import json, sys
-try:
-    obj = json.load(open("sa.json","r",encoding="utf-8"))
-    print("✅ SA client_email:", obj.get("client_email"))
-except Exception as e:
-    print("❌ service account json invalid:", e)
-    sys.exit(1)
-PY
-
-      - name: Run job (download + preprocess + upload + write to Sheets)
-        timeout-minutes: 20
-        env:
-          TZ: Asia/Seoul
-          SA_PATH: ${{ github.workspace }}/sa.json
-          DRIVE_FOLDER_ID: ${{ secrets.DRIVE_FOLDER_ID }}
-          DRIVE_RETENTION_DAYS: "3"
-          SHEET_ID: ${{ secrets.SHEET_ID }}
-        run: |
-          set -euxo pipefail
-          python rt_allinone.py 2>&1 | tee runlog.txt
-
-      - name: Upload logs
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: run-logs
-          path: |
-            pip-install.log
-            runlog.txt
-            sa.json
-            page_dump_*.html
-            page_dump_*.png
-          if-no-files-found: warn
+      - name: Say hi
+        run: echo "molit workflow is visible ✅"
