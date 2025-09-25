@@ -32,6 +32,22 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      - name: Run job (download + preprocess + upload + write to Sheets)
+        env:
+          SHEET_ID: ${{ secrets.SHEET_ID }}
+          DRIVE_FOLDER_ID: ${{ secrets.DRIVE_FOLDER_ID }}
+          SA_PATH:  ${{ github.workspace }}/sa.json
+          CHROME_BIN: /usr/bin/chromium-browser
+          CHROMEDRIVER_BIN: /usr/bin/chromedriver
+          PYTHONUNBUFFERED: "1"
+          TZ: Asia/Seoul
+        run: |
+          python -V
+          /usr/bin/chromium-browser --version || true
+          /usr/bin/chromedriver --version || true
+          python -u rt_allinone.py   # <= 여기 -u
+
+
       # 서비스계정 키 JSON을 sa.json 파일로 저장
       - name: Write service account json
         run: |
