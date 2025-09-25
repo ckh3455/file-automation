@@ -1,12 +1,9 @@
 # -*- coding: utf-8 -*-
 """
-rt_allinone.py (stabilized)
-- 날짜 입력 후 짧은 안정화 대기
-- 다운로드 버튼 탐색 범위 확대 + 5초 폴링
-- 다운로드 버튼이 안 보이면 '조회/검색' 먼저 눌러본 뒤 재탐색
-- 시작감지 30초 / 최대 10회 (예전 안정값)
-- 전처리 + 엑셀 저장 + (SA JSON 정상일 때만) 구글시트 기록
-- ARTIFACTS_MODE가 설정되면 드라이브 업로드는 생략
+rt_allinone.py — revert to the simple, conservative download logic
+- Find Excel anchor a[href*=".xls|.xlsx"] with a generous (12s) wait
+- No pre-emptive '조회/검색' click
+- Start-detect 30s, max tries 10 (as when it worked)
 """
 
 from __future__ import annotations
@@ -27,13 +24,14 @@ PROFILE  = ROOT / "_rt_profile"
 for p in (SAVE_DIR, TMP_DL, PROFILE):
     p.mkdir(parents=True, exist_ok=True)
 
-# 안정값(이전처럼)
+# ===== 안정 값(“되던 세팅”) =====
 CLICK_MAX_TRY = int(os.environ.get("CLICK_MAX_TRY", "10"))
-START_DETECT_SEC = int(os.environ.get("START_DETECT_SEC", "30"))
+START_DETECT_SEC = int(os.environ.get("START_DETECT_SEC", "30"))  # 시작감지 30초
 DOWNLOAD_TIMEOUT_FINISH = 300
 COOLDOWN_BETWEEN_FILES = 2
-WAIT_AFTER_SET_DATES = float(os.environ.get("WAIT_AFTER_SET_DATES", "3.0"))  # <-- 추가: 날짜 입력 후 안정화
+BUTTON_APPEAR_WAIT = float(os.environ.get("BUTTON_APPEAR_WAIT", "12"))  # 엑셀버튼 등장 대기
 
+# ===== Sheets/Drive =====
 SHEET_ID = os.environ.get("SHEET_ID", "").strip()
 SA_PATH  = os.environ.get("SA_PATH", "").strip()
 DRIVE_FOLDER_ID = os.environ.get("DRIVE_FOLDER_ID", "").strip()
@@ -62,7 +60,6 @@ from selenium.webdriver.chrome.service import Service
 from webdriver_manager.chrome import ChromeDriverManager
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.common.alert import Alert
 from selenium.common.exceptions import (
     TimeoutException, ElementClickInterceptedException, ElementNotInteractableException
 )
@@ -83,8 +80,7 @@ def build_driver(download_dir: Path) -> webdriver.Chrome:
     opts.add_argument("--no-sandbox")
     opts.add_argument("--disable-gpu")
     opts.add_argument("--disable-dev-shm-usage")
-    # 세션 충돌 방지
-    opts.add_argument(f"--user-data-dir={PROFILE.resolve()}")
+    opts.add_argument(f"--user-data-dir={PROFILE.resolve()}")  # 세션 충돌 방지
     service = Service(ChromeDriverManager().install())
     driver = webdriver.Chrome(service=service, options=opts)
     driver.set_window_size(1400, 900)
@@ -92,20 +88,14 @@ def build_driver(download_dir: Path) -> webdriver.Chrome:
 
 # ---------- 날짜 입력 ----------
 def find_date_inputs(driver: webdriver.Chrome) -> Tuple:
+    # 간단/보수: 눈에 보이는 input 두 개를 선순위로
+    inputs = [e for e in driver.find_elements(By.CSS_SELECTOR, "input") if e.is_displayed()]
+    if len(inputs) >= 2:
+        return inputs[0], inputs[1]
+    # 혹시 몰라 fallback
     inputs = driver.find_elements(By.CSS_SELECTOR, "input")
-    cands = []
-    for el in inputs:
-        try:
-            t = ((el.get_attribute("value") or "") + " " + (el.get_attribute("placeholder") or "")).strip()
-            if re.search(r"\d{4}-\d{2}-\d{2}", t) or "YYYY" in t or "yyyy" in t or "YYYY-MM-DD" in t:
-                cands.append(el)
-        except Exception:
-            pass
-    if len(cands) >= 2:
-        return cands[0], cands[1]
-    text_inputs = [e for e in inputs if (e.get_attribute("type") or "").lower() in ("text", "")]
-    if len(text_inputs) >= 2:
-        return text_inputs[0], text_inputs[1]
+    if len(inputs) >= 2:
+        return inputs[0], inputs[1]
     raise RuntimeError("날짜 입력 박스를 찾을 수 없습니다.")
 
 def clear_and_type(el, s: str):
@@ -117,119 +107,55 @@ def clear_and_type(el, s: str):
 def set_dates(driver: webdriver.Chrome, start: date, end: date):
     log(f"  - set_dates: {start.isoformat()} ~ {end.isoformat()}")
     s_el, e_el = find_date_inputs(driver)
-    clear_and_type(s_el, start.isoformat()); time.sleep(0.2)
-    clear_and_type(e_el, end.isoformat());   time.sleep(0.2)
-    # 입력 후 약간 안정화
-    time.sleep(WAIT_AFTER_SET_DATES)
+    clear_and_type(s_el, start.isoformat()); time.sleep(0.1)
+    clear_and_type(e_el, end.isoformat());   time.sleep(0.1)
+    # 보수: 너무 길게 안 기다리고 0.5초만 안정화
+    time.sleep(0.5)
 
 def select_sido(driver: webdriver.Chrome, wanted: str) -> bool:
-    selects = driver.find_elements(By.TAG_NAME, "select")
     wanted = wanted.strip()
-    for sel in selects:
+    sels = driver.find_elements(By.TAG_NAME, "select")
+    for sel in sels:
         try:
-            opts = sel.find_elements(By.TAG_NAME, "option")
-            txts = [o.text.strip() for o in opts]
-            if "전체" in txts and "서울특별시" in txts:
-                for o in opts:
-                    if o.text.strip() == wanted:
-                        o.click(); time.sleep(0.3)
-                        log(f"  - select_sido({wanted}): True")
-                        return True
+            for o in sel.find_elements(By.TAG_NAME, "option"):
+                if o.text.strip() == wanted:
+                    o.click(); time.sleep(0.2)
+                    log(f"  - select_sido({wanted}): True")
+                    return True
         except Exception:
             pass
     log(f"  - select_sido({wanted}): False")
     return False
 
-def _close_alert_if_any(driver: webdriver.Chrome):
-    try:
-        WebDriverWait(driver, 0.8).until(EC.alert_is_present())
-        Alert(driver).accept()
-        time.sleep(0.2)
-    except TimeoutException:
-        pass
-
-# ---------- 보조: '조회/검색' 먼저 시도 ----------
-def maybe_click_search(driver: webdriver.Chrome) -> bool:
-    # 텍스트/aria/속성에 '조회' '검색' 포함
-    selectors = [
-        "button", "a", "input", "[role='button']"
-    ]
-    kw = re.compile(r"(조회|검색)", re.I)
-    try:
-        cands = []
-        for sel in selectors:
-            cands.extend(driver.find_elements(By.CSS_SELECTOR, sel))
-        for el in cands:
-            txt = " ".join([
-                el.text or "",
-                el.get_attribute("value") or "",
-                el.get_attribute("title") or "",
-                el.get_attribute("aria-label") or "",
-                el.get_attribute("id") or "",
-                el.get_attribute("class") or "",
-                el.get_attribute("onclick") or "",
-            ])
-            if kw.search(txt):
-                try:
-                    driver.execute_script("arguments[0].scrollIntoView({block:'center'});", el)
-                    time.sleep(0.1)
-                    el.click()
-                except Exception:
-                    try:
-                        driver.execute_script("arguments[0].click();", el)
-                    except Exception:
-                        continue
-                _close_alert_if_any(driver)
-                # 조회 직후 결과 렌더 안정화
-                time.sleep(1.2)
-                return True
-    except Exception:
-        pass
-    return False
-
-# ---------- 다운로드 버튼 탐색(확대) ----------
-def find_download_button(driver: webdriver.Chrome, wait_sec: float = 5.0):
-    t0 = time.time()
-    while time.time() - t0 < wait_sec:
-        # 1) .xls/.xlsx 링크
-        els = driver.find_elements(By.CSS_SELECTOR, 'a[href*=".xls"],a[href*=".xlsx"]')
-        els = [e for e in els if e.is_displayed()]
-        if els:
-            return els[0]
-        # 2) 흔한 id/class
-        for sel in [
-            "#excel", "#btnExcel", "#btnXls", ".btn-excel", ".excel", "[download]",
-            "a[onclick*='xls']", "button[onclick*='xls']", "input[onclick*='xls']",
-            "a[onclick*='excel']", "button[onclick*='excel']", "input[onclick*='excel']",
-        ]:
-            try:
-                el = driver.find_element(By.CSS_SELECTOR, sel)
-                if el and el.is_displayed():
-                    return el
-            except Exception:
-                pass
-        # 3) 텍스트 기반(엑셀/EXCEL/excel/다운/내려받기)
+# ---------- 다운로드 버튼 ----------
+def find_download_button_simple(driver: webdriver.Chrome, wait_sec: float = BUTTON_APPEAR_WAIT):
+    # 예전에 잘 먹히던 단순한 방법: 엑셀 링크를 기다린다
+    end_time = time.time() + wait_sec
+    last_err = None
+    while time.time() < end_time:
         try:
-            btn = driver.execute_script(r"""
-            const tests = s => /(엑셀|EXCEL|excel|다운|내려받기)/i.test(s||"");
-            const all = Array.from(document.querySelectorAll('button,a,input,[role="button"]'));
-            let el = all.find(e => tests(e.innerText));
-            if (el && el.offsetParent !== null) return el;
-            el = all.find(e => tests(e.value)||tests(e.title)||tests(e.getAttribute('aria-label'))||tests(e.getAttribute('onclick'))||tests(e.id)||tests(e.className));
-            if (el && el.offsetParent !== null) return el;
-            return null;
-            """)
-            if btn:
-                return btn
-        except Exception:
-            pass
+            # 우선순위: .xlsx/.xls 링크
+            els = driver.find_elements(By.CSS_SELECTOR, 'a[href*=".xlsx"],a[href*=".xls"]')
+            vis = [e for e in els if e.is_displayed()]
+            if vis:
+                return vis[0]
+            # 보조: id/class 흔한 명칭
+            for sel in ["#excel", "#btnExcel", ".btn-excel", ".excel", "a[download]"]:
+                try:
+                    el = driver.find_element(By.CSS_SELECTOR, sel)
+                    if el.is_displayed():
+                        return el
+                except Exception as e:
+                    last_err = e
+        except Exception as e:
+            last_err = e
         time.sleep(0.3)
     return None
 
 def _try_click(driver: webdriver.Chrome, el) -> bool:
     try:
         driver.execute_script("arguments[0].scrollIntoView({block:'center'});", el)
-        time.sleep(0.1)
+        time.sleep(0.05)
         el.click()
         return True
     except (ElementClickInterceptedException, ElementNotInteractableException):
@@ -247,8 +173,7 @@ def _snapshot_files(download_dir: Path) -> set[Path]:
 
 def _new_files_since(download_dir: Path, before: set[Path]) -> List[Path]:
     now = set(download_dir.glob("*"))
-    new_files = [p for p in now - before if p.is_file()]
-    return sorted(new_files, key=lambda p: p.stat().st_mtime)
+    return sorted([p for p in now - before if p.is_file()], key=lambda p: p.stat().st_mtime)
 
 def _wait_download_finish(download_dir: Path, before: set[Path], timeout: int = DOWNLOAD_TIMEOUT_FINISH) -> Path:
     t0 = time.time()
@@ -261,29 +186,15 @@ def _wait_download_finish(download_dir: Path, before: set[Path], timeout: int = 
     raise TimeoutError("다운로드 완료 대기 초과")
 
 def click_and_detect_start(driver: webdriver.Chrome, download_dir: Path, start_detect_sec=START_DETECT_SEC) -> Optional[set]:
-    _close_alert_if_any(driver)
-
-    # 1) 다운로드 버튼 기다리며 탐색
-    btn = find_download_button(driver, wait_sec=5.0)
-
-    # 2) 없으면 '조회/검색' 먼저 시도 후 재탐색
-    if not btn:
-        maybe_click_search(driver)
-        btn = find_download_button(driver, wait_sec=3.0)
-
+    btn = find_download_button_simple(driver, wait_sec=BUTTON_APPEAR_WAIT)
     if not btn:
         return None
-
     if not _try_click(driver, btn):
         return None
-
-    _close_alert_if_any(driver)
-
     before = _snapshot_files(download_dir)
     t0 = time.time()
     while time.time() - t0 < start_detect_sec:
-        new_files = _new_files_since(download_dir, before)
-        if new_files:
+        if _new_files_since(download_dir, before):
             return before
         time.sleep(0.5)
     return None
@@ -302,10 +213,11 @@ def download_with_retry(driver: webdriver.Chrome, download_dir: Path, max_try=CL
         else:
             log(f"  - warn: 다운로드 시작 감지 실패(시도 {i}/{max_try})")
             if i % 3 == 0:
+                # 예전처럼 3회마다 새로고침
                 driver.refresh(); time.sleep(1.0)
     raise TimeoutError(f"다운로드 시작 감지 실패({max_try}회 초과)")
 
-# ---------- 전처리 ----------
+# ---------- 표 읽기/전처리/피벗 ----------
 def _read_html_table(path: Path) -> pd.DataFrame:
     tables = pd.read_html(str(path), flavor="bs4", thousands=",", displayed_only=False)
     for t in tables:
@@ -403,7 +315,7 @@ def load_service_account() -> Optional[dict]:
         return None
     try:
         with open(SA_PATH, "r", encoding="utf-8") as f:
-            data = json.load(f)
+            data = json.load(f)  # << 현재 에러가 여기서 발생 중 (시크릿 JSON 포맷)
         log("  - SA loaded.")
         return data
     except Exception as e:
@@ -413,8 +325,7 @@ def load_service_account() -> Optional[dict]:
 _gspread = None
 def get_gspread_client():
     global _gspread
-    if _gspread is not None:
-        return _gspread
+    if _gspread is not None: return _gspread
     sa = load_service_account()
     if not sa: return None
     try:
@@ -558,6 +469,7 @@ def fetch_and_process(driver: webdriver.Chrome,
             write_seoul_to_sheets(spread, start=start, end=end, pv=pv)
 
 def main():
+    # Sheets는 SA JSON이 정상일 때만
     gs = get_gspread_client()
     spread = None
     if gs and SHEET_ID:
