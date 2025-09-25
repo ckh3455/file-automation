@@ -79,25 +79,21 @@ def yymmdd(d: date) -> str:
 # -------------------------
 # 브라우저 (헤드리스 최적화)
 # -------------------------
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.chrome.options import Options
+import os
+
 def build_driver(download_dir: Path) -> webdriver.Chrome:
     opts = Options()
-    # 액션에서 깔아둔 경로(없으면 기본)
-    chrome_bin = os.getenv("CHROME_BIN") or "/usr/bin/chromium-browser"
-    driver_bin = os.getenv("CHROMEDRIVER_BIN") or "/usr/bin/chromedriver"
-    if Path(chrome_bin).exists():
-        opts.binary_location = chrome_bin
-
-    # 헤드리스 필수 옵션
+    # ✅ CI(액션즈)에서 필수
     opts.add_argument("--headless=new")
     opts.add_argument("--no-sandbox")
     opts.add_argument("--disable-dev-shm-usage")
-    opts.add_argument("--disable-gpu")
-    opts.add_argument("--lang=ko-KR")
-    opts.add_argument("--window-size=1400,900")
-    # 자동화 감춤
-    opts.add_experimental_option("excludeSwitches", ["enable-automation"])
-    opts.add_experimental_option("useAutomationExtension", False)
-    opts.add_argument("--disable-blink-features=AutomationControlled")
+
+    # ✅ 액션즈에서 설치한 chromium 경로 사용
+    chrome_bin = os.environ.get("CHROME_BIN")
+    if chrome_bin:
+        opts.binary_location = chrome_bin
 
     prefs = {
         "download.default_directory": str(download_dir),
@@ -107,20 +103,14 @@ def build_driver(download_dir: Path) -> webdriver.Chrome:
     }
     opts.add_experimental_option("prefs", prefs)
 
-    service = Service(driver_bin) if Path(driver_bin).exists() else Service()
+    # ✅ 액션즈에서 설치한 chromedriver 경로 사용(없으면 webdriver-manager)
+    driver_bin = os.environ.get("CHROMEDRIVER_BIN")
+    service = Service(driver_bin) if driver_bin else Service(ChromeDriverManager().install())
+
     driver = webdriver.Chrome(service=service, options=opts)
     driver.set_window_size(1400, 900)
-
-    # 헤드리스 다운로드 허용
-    try:
-        driver.execute_cdp_cmd(
-            "Page.setDownloadBehavior",
-            {"behavior": "allow", "downloadPath": str(download_dir)}
-        )
-    except Exception:
-        pass
-
     return driver
+
 
 # -------------------------
 # 페이지 조작
@@ -402,3 +392,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
