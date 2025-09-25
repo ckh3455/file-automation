@@ -2,26 +2,29 @@ name: molit-daily
 
 on:
   schedule:
-    # 매일 09:05 KST == 00:05 UTC
-    - cron: "5 0 * * *"
+    - cron: "5 0 * * *"   # 매일 09:05 KST (00:05 UTC)
   workflow_dispatch:
 
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 30
+    env:
+      CI: "1"
+      # 파이썬 출력 버퍼링 끄기(실시간 로그)
+      PYTHONUNBUFFERED: "1"
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # 크롬/드라이버 설치 (snap이라 시간이 좀 걸립니다)
       - name: Install Chromium & Chromedriver
         run: |
+          set -euxo pipefail
           sudo apt-get update
           sudo apt-get install -y chromium-browser chromium-chromedriver
-          echo "CHROME_BIN=/usr/bin/chromium-browser" >> $GITHUB_ENV
-          echo "CHROMEDRIVER_BIN=/usr/bin/chromedriver" >> $GITHUB_ENV
+          echo "CHROME_BIN=/usr/bin/chromium-browser"   >> "$GITHUB_ENV"
+          echo "CHROMEDRIVER_BIN=/usr/bin/chromedriver" >> "$GITHUB_ENV"
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -30,31 +33,60 @@ jobs:
 
       - name: Install deps
         run: |
+          set -euxo pipefail
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      # 서비스계정 JSON을 sa.json로 저장 (멀티라인을 안전하게 처리)
       - name: Write service account json
-        shell: bash
         run: |
-          cat > sa.json <<'JSON'
-          ${{ secrets.GDRIVE_SA_JSON }}
-          JSON
+          set -euxo pipefail
+          # 서비스계정 JSON 작성 (줄바꿈/공백 그대로)
+          printf "%s" "${{ secrets.GDRIVE_SA_JSON }}" > sa.json
+          chmod 600 sa.json
+          # 최소한의 유효성 검증(내용은 출력하지 않음)
+          python - <<'PY'
+          import json, sys
+          try:
+              with open("sa.json","r") as f:
+                  data=json.load(f)
+              assert "client_email" in data and "private_key" in data
+          except Exception as e:
+              print("SA JSON 검증 실패:", e, file=sys.stderr)
+              sys.exit(1)
+          print("SA JSON OK")
+          PY
+
+      - name: Show versions & sanity check
+        run: |
+          set -euxo pipefail
+          python --version
+          pip --version
+          chromium-browser --version || true
+          chromedriver --version || true
+          ls -al
+          # 파일 존재 확인
+          test -f rt_allinone.py
+          test -f sa.json
 
       - name: Run job (download + preprocess + upload + write to Sheets)
+        timeout-minutes: 20
         env:
-          SHEET_ID: ${{ secrets.SHEET_ID }}
-          DRIVE_FOLDER_ID: ${{ secrets.DRIVE_FOLDER_ID }}
-          SA_PATH:  ${{ github.workspace }}/sa.json
-          CHROME_BIN: /usr/bin/chromium-browser
-          CHROMEDRIVER_BIN: /usr/bin/chromedriver
-          PYTHONUNBUFFERED: "1"   # 파이썬 버퍼링 끔
           TZ: Asia/Seoul
+          SA_PATH: ${{ github.workspace }}/sa.json
+          DRIVE_FOLDER_ID: ${{ secrets.DRIVE_FOLDER_ID }}
+          DRIVE_RETENTION_DAYS: "3"
+          SHEET_ID: ${{ secrets.SHEET_ID }}
+        shell: bash
         run: |
-          set -e
-          echo "== versions =="
-          python -V
-          /usr/bin/chromium-browser --version || true
-          /usr/bin/chromedriver --version || true
-          echo "== start script =="
-          python -u rt_allinone.py   # <-- 꼭 -u
+          set -euxo pipefail
+          # 실시간 로그 + 파일 저장
+          python -u rt_allinone.py 2>&1 | tee runlog.txt
+
+      # 실패/성공과 상관없이 로그 보관
+      - name: Upload run log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: runlog
+          path: runlog.txt
+          retention-days: 7
