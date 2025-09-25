@@ -16,6 +16,9 @@ from typing import Optional, Tuple
 
 import pandas as pd
 import numpy as np
+import os
+USE_DRIVE = os.getenv("USE_DRIVE", "0") == "1"   # 기본: 끔
+
 
 # ---------- 환경/경로 ----------
 URL = "https://rt.molit.go.kr/pt/xls/xls.do?mobileAt="
@@ -418,9 +421,12 @@ def load_sa_credentials(sa_path: Path):
         debug(f"  ! service account load failed: {e}")
         return None
 
-def drive_upload_and_cleanup(creds, file_path: Path):
-    if not (creds and DRIVE_FOLDER_ID):
+def drive_upload_and_cleanup(creds, file_path):
+    if not USE_DRIVE:
+        debug("  - skip Drive upload (Artifacts mode).")
         return
+    # ... 기존 코드 그대로 ...
+
     try:
         from googleapiclient.discovery import build
         from googleapiclient.http import MediaFileUpload
@@ -620,3 +626,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
