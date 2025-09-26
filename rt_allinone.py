@@ -541,29 +541,41 @@ def fetch_and_process(driver: webdriver.Chrome,
 
 # ---------- 메인 ----------
 def main():
+    # 서비스 계정은 있어도 되고 없어도 됨(Artifacts 모드 기준)
     sa_path = Path(os.getenv("SA_PATH", "sa.json"))
     creds = load_sa_credentials(sa_path) if sa_path.exists() else None
 
     driver = build_driver(TMP_DL)
     try:
-        t = today_kst()
+        t = today_kst()  # 오늘 (KST)
 
-        # --- 전국: 최근 12개월(롤링) ---
-        # 시작 = 이번달 1일에서 -11개월 → "작년의 다음 달 1일"
-        months = [shift_months(month_first(t), k) for k in range(-11, 1)]  # -11, -10, ..., 0
-        for base in months:
+        # -----------------------------
+        # 전국: 최근 12개월(당월 포함, 당월은 오늘까지)
+        # 시작 월들: (t를 기준으로) 11개월 전의 '다음달부터'가 아니라, 각 월 단위 파일을 12개 받습니다.
+        # 예: t=2025-09-26 → 2024-10 ~ 2025-09
+        bases = [shift_months(month_first(t), -i) for i in range(11, -1, -1)]
+        for base in bases:
             start = base
-            end = t if (base.year, base.month) == (t.year, t.month) else (shift_months(base, +1) - timedelta(days=1))
+            end = t if (base.year, base.month) == (t.year, t.month) else (shift_months(base, 1) - timedelta(days=1))
             name = f"전국 {yymm(base)}_{yymmdd(t)}.xlsx"
             debug(f"[전국] {start} ~ {end} → {name}")
-            fetch_and_process(driver, None, start, end, name, mode="national", creds=creds)
+            fetch_and_process(
+                driver, None, start, end, name,
+                mode="national", creds=creds
+            )
 
-        # --- 서울: 사이트 제한으로 최근 1년 ---
-        seoul_start = shift_months(t, -12)           # 또는 month_first(t)로 월초 기준 원하면 바꿔도 됨
-        seoul_end   = t
-        debug(f"[서울] {seoul_start} ~ {seoul_end} → 서울시 {yymmdd(t)}.xlsx")
-        fetch_and_process(driver, "서울특별시", seoul_start, seoul_end,
-                          f"서울시 {yymmdd(t)}.xlsx", mode="seoul", creds=creds)
+        # -----------------------------
+        # 서울: 사이트 1년 제한 준수
+        # “이달의 다음달부터 시작” = t 기준 11개월 전의 '월초'
+        # 예: t=2025-09-26 → 시작=2024-10-01, 끝=t
+        seoul_start = month_first(shift_months(t, -11))
+        seoul_end = t
+        seoul_name = f"서울시 {yymmdd(t)}.xlsx"
+        debug(f"[서울] {seoul_start} ~ {seoul_end} → {seoul_name}")
+        fetch_and_process(
+            driver, "서울특별시", seoul_start, seoul_end, seoul_name,
+            mode="seoul", creds=creds
+        )
 
     finally:
         try:
@@ -572,7 +584,9 @@ def main():
             pass
 
 
+
 if __name__ == "__main__":
     main()
+
 
 
