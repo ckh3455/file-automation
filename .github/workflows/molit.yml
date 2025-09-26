@@ -1,4 +1,4 @@
-name: molit-daily
+name: 몰리트
 
 on:
   schedule:
@@ -34,42 +34,33 @@ jobs:
         run: |
           set -euxo pipefail
           python -m pip install --upgrade pip
-          pip install -r requirements.txt --default-timeout=120 -v 2>&1 | tee pip-install.log
+          pip install -r requirements.txt
 
-      # 서비스계정 JSON을 파일로 저장 (jq 검사 생략: 설치/권한 이슈 피하기)
       - name: Write service account json
         run: |
           set -euxo pipefail
-          printf "%s" "${{ secrets.GDRIVE_SA_JSON }}" > sa.json
+          # GDRIVE_SA_JSON은 "원본 JSON"을 줄바꿈 포함 그대로 붙여넣어야 합니다.
+          printf "%s" "${{ secrets.GDRIVE_SA_JSON }}" > sa.json || true
 
       - name: Run job
         timeout-minutes: 20
         env:
           TZ: Asia/Seoul
           SA_PATH: ${{ github.workspace }}/sa.json
-          SHEET_ID: ${{ secrets.SHEET_ID }}         # 시트 쓰기가 필요 없으면 rt_allinone.py에서 USE_SHEETS 가드로 끄기
-          USE_DRIVE: "0"                             # 🔴 Drive 업로드 끔 (Artifacts 모드)
+          DRIVE_FOLDER_ID: ${{ secrets.DRIVE_FOLDER_ID }}
+          DRIVE_RETENTION_DAYS: "3"
+          SHEET_ID: ${{ secrets.SHEET_ID }}
         run: |
           set -euxo pipefail
-          python rt_allinone.py 2>&1 | tee runlog.txt
+          python rt_allinone.py | tee runlog.txt
 
-      # ✅ 결과 엑셀을 GitHub Artifacts로 보관 (3일)
       - name: Upload outputs as artifact (keep 3 days)
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: outputs-${{ github.run_id }}
-          path: output/*.xlsx
-          retention-days: 3
-          if-no-files-found: warn
-
-      # (선택) 설치/실행 로그 업로드
-      - name: Upload logs
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: run-logs-${{ github.run_id }}
           path: |
-            pip-install.log
+            output/*.xlsx
             runlog.txt
+          retention-days: 3
           if-no-files-found: warn
