@@ -550,7 +550,7 @@ def main():
         t = today_kst()
 
         # 전국: 현재 달 포함 12개월
-        bases = [shift_months(month_first(t), -i) for i in range(0, 12)]
+        bases = [shift_s(_first(t), -i) for i in range(0, 12)]
         bases.sort()
         for base in bases:
             start = base
@@ -559,15 +559,13 @@ def main():
             debug(f"[전국] {start} ~ {end} → {name}")
             fetch_and_process(driver, None, start, end, name, mode="national", creds=creds)
 
-        # 서울: 전년도 10월 1일 ~ 오늘
-        if t.month >= 10:
-            seoul_start = date(t.year - 1, 10, 1)
-        else:
-            seoul_start = date(t.year - 2, 10, 1)
-        seoul_end = t
-        seoul_name = f"서울시 {yymmdd(t)}.xlsx"
-        debug(f"[서울] {seoul_start} ~ {seoul_end} → {seoul_name}")
-        fetch_and_process(driver, "서울특별시", seoul_start, seoul_end, seoul_name, mode="seoul", creds=creds)
+        # 서울: 최근 1년(사이트 제한)
+seoul_start = shift_months(t, -12)   # 오늘과 같은 ‘일’ 기준으로 12개월 전
+seoul_end   = t
+
+fetch_and_process(driver, "서울특별시", seoul_start, seoul_end,
+                  f"서울시 {yymmdd(t)}.xlsx", mode="seoul", creds=creds)
+
 
     finally:
         try:
@@ -577,3 +575,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
