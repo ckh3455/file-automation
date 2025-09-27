@@ -2,7 +2,7 @@ name: molit-daily
 
 on:
   schedule:
-    - cron: "5 0 * * *"   # 매일 09:05 KST
+    - cron: "0 0 * * *"   # 매일 09:05 KST
   workflow_dispatch:
 
 jobs:
