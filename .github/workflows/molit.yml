@@ -1,19 +1,15 @@
 name: molit-daily
 
 on:
-  schedule:
-    on:
+  workflow_dispatch:
   schedule:
     - cron: "0 23 * * *"    # 08:00 KST
     - cron: "30 23 * * *"   # 08:30 KST (백업)
-  workflow_dispatch:
-
-  workflow_dispatch:
 
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 60                      # 잡 전체 타임아웃 늘림
+    timeout-minutes: 60
     env:
       CI: "1"
       PYTHONUNBUFFERED: "1"
@@ -47,17 +43,14 @@ jobs:
           printf "%s" "${{ secrets.GDRIVE_SA_JSON }}" > sa.json || true
 
       - name: Run job
-        timeout-minutes: 45                  # 서울 큰 파일 대비 스텝 타임아웃 상향
+        timeout-minutes: 45
         env:
           TZ: Asia/Seoul
           SA_PATH: ${{ github.workspace }}/sa.json
-          # 다운로드/재시도 파라미터 (요청사항)
-          DOWNLOAD_TIMEOUT: "30"             # 클릭 성공 후 다운로드 감지 대기 30초
-          CLICK_RETRY_MAX: "15"              # 최대 15회
-          CLICK_RETRY_WAIT: "1"              # 실패 시 다음 시도까지 1초
-          # 아티팩트 모드 (Drive/Sheets 스킵)
+          DOWNLOAD_TIMEOUT: "30"
+          CLICK_RETRY_MAX: "15"
+          CLICK_RETRY_WAIT: "1"
           ARTIFACTS_ONLY: "1"
-          # (추후 Sheets/Drive 쓸 때만 설정)
           DRIVE_FOLDER_ID: ${{ secrets.DRIVE_FOLDER_ID }}
           DRIVE_RETENTION_DAYS: "3"
           SHEET_ID: ${{ secrets.SHEET_ID }}
