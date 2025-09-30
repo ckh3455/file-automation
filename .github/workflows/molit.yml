@@ -3,8 +3,8 @@ name: molit-daily
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 23 * * *"    # 08:00 KST
-    - cron: "30 23 * * *"   # 08:30 KST (백업)
+    - cron: "0 22 * * *"    # 08:00 KST
+    - cron: "0 23 * * *"   # 08:30 KST (백업)
 
 jobs:
   run:
