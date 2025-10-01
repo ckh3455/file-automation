@@ -13,6 +13,10 @@
   · 컬럼 순서: (지역 컬럼들 맨 왼쪽) + ... + (계약년, 계약월, 계약일 순서로 계약년/월을 계약일 왼쪽에)
   · 엑셀 저장 시 각 열 너비를 데이터 최대 길이에 맞춰 자동 조정
 - 아티팩트 모드(ARTIFACTS_ONLY=1)일 땐 Drive/Sheets는 스킵
+
+2025-10-01 패치:
+- 월초(1일)에 당월 1일치(당일) 데이터가 없어서 다운로드가 시작되지 않는 경우,
+  에러 대신 '자료 없음(월초)' 엑셀을 저장하고 정상 진행하도록 처리
 """
 
 from __future__ import annotations
@@ -81,7 +85,7 @@ def build_driver(download_dir: Path) -> webdriver.Chrome:
     opts.add_argument("--lang=ko-KR")
     opts.add_argument(
         "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        "AppleWebKit(537.36) (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     )
     prefs = {
         "download.default_directory": str(download_dir),
@@ -473,6 +477,15 @@ def sheets_write(*_args, **_kwargs):
     debug("  - skip Sheets write (Artifacts mode).")
 
 # ---------- 한 덩어리 처리 ----------
+def _is_month_first_today_single_day_range(req_start: date, req_end: date) -> bool:
+    """오늘이 1일이고, 요청 구간이 (당월 1일 ~ 당월 1일)인지 검사"""
+    tk = today_kst()
+    return (
+        tk.day == 1 and
+        req_start == req_end == tk and
+        req_start == month_first(tk)
+    )
+
 def fetch_and_process(driver: webdriver.Chrome,
                       sido: Optional[str],
                       start: date,
@@ -528,6 +541,20 @@ def fetch_and_process(driver: webdriver.Chrome,
             continue
 
     if not got_file:
+        # === 월초(1일) & (당월 1일~1일) 범위일 때: 자료가 없을 수 있으므로 '자료 없음' 파일 저장 후 정상 종료 ===
+        if _is_month_first_today_single_day_range(start, end):
+            out = SAVE_DIR / outname
+            note = pd.DataFrame([{
+                "메시지": "자료 없음(월초)",
+                "기간": f"{start}~{end}",
+                "기준일": today_kst().isoformat()
+            }])
+            save_excel(out, note)
+            debug(f"  - no data for first day of month; wrote empty: {out}")
+            drive_upload_and_cleanup(None, out)  # 아티팩트 모드면 내부에서 스킵
+            return
+
+        # 그 외 케이스는 기존대로 에러
         raise RuntimeError("다운로드 시작 감지 실패(최대 시도 초과)")
 
     df = read_table(got_file, mode=mode)
@@ -551,8 +578,7 @@ def main():
 
         # -----------------------------
         # 전국: 최근 12개월(당월 포함, 당월은 오늘까지)
-        # 시작 월들: (t를 기준으로) 11개월 전의 '다음달부터'가 아니라, 각 월 단위 파일을 12개 받습니다.
-        # 예: t=2025-09-26 → 2024-10 ~ 2025-09
+        # 예: t=2025-10-01 → 2024-11 ~ 2025-10
         bases = [shift_months(month_first(t), -i) for i in range(11, -1, -1)]
         for base in bases:
             start = base
@@ -566,8 +592,7 @@ def main():
 
         # -----------------------------
         # 서울: 사이트 1년 제한 준수
-        # “이달의 다음달부터 시작” = t 기준 11개월 전의 '월초'
-        # 예: t=2025-09-26 → 시작=2024-10-01, 끝=t
+        # 예: t=2025-10-01 → 시작=2024-11-01, 끝=t
         seoul_start = month_first(shift_months(t, -11))
         seoul_end = t
         seoul_name = f"서울시 {yymmdd(t)}.xlsx"
@@ -584,9 +609,5 @@ def main():
             pass
 
 
-
 if __name__ == "__main__":
     main()
-
-
-
